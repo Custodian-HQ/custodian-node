@@ -52,6 +52,16 @@ describe('the key store', () => {
     }
   });
 
+  it('keeps the pinned key after a request for a reset', async () => {
+    const a = Buffer.alloc(32);
+    const b = Buffer.alloc(32, 1);
+    const store = new MemoryKeyStore();
+    await observe(store, enrolled('cus_1', a));
+    await observe(store, { type: 'customer.reset_requested', data: { object: { id: 'cus_1' } } });
+    expect(await codeOf(() => observe(store, enrolled('cus_1', b)))).toBe('key_changed');
+    expect(store.get('cus_1')?.equals(a)).toBe(true);
+  });
+
   it('refuses a bad event and ignores other types', async () => {
     const store = new MemoryKeyStore();
     for (const object of [{ vault_sign_key: 'AAAA' }, { id: 'cus_1', vault_sign_key: Buffer.alloc(31).toString('base64url') }, { id: 'cus_1', vault_sign_key: '!!' }, null]) {

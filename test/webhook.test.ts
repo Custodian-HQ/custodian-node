@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TOLERANCE_SECONDS, SIGNATURE_HEADER, WebhookError, constructEvent, recoveryActionRequired, recoveryHolderDeclined, recoveryStatusChanged, verify } from '../src/webhook.js';
+import { DEFAULT_TOLERANCE_SECONDS, SIGNATURE_HEADER, WebhookError, constructEvent, customerSignInLimitReached, recoveryActionRequired, recoveryHolderDeclined, recoveryStatusChanged, verify } from '../src/webhook.js';
 
 interface Vector {
   header_name: string;
@@ -78,5 +78,18 @@ describe('recoveryHolderDeclined', () => {
 
   it('refuses another event type', () => {
     expect(() => recoveryHolderDeclined({ ...event, type: 'recovery.action_required' })).toThrow();
+  });
+});
+
+describe('customerSignInLimitReached', () => {
+  const event = { id: 'evt_4', type: 'customer.sign_in_limit_reached', created: 1700000000, livemode: true,
+    data: { object: { customer: 'cus_1', livemode: true, brake: 'keyring_read', limit: 10, reached_at: '2026-10-29T10:00:00Z' } } };
+
+  it('reads the object of the event', () => {
+    expect(customerSignInLimitReached(event)).toMatchObject({ customer: 'cus_1', brake: 'keyring_read', limit: 10 });
+  });
+
+  it('refuses another event type', () => {
+    expect(() => customerSignInLimitReached({ ...event, type: 'recovery.action_required' })).toThrow();
   });
 });

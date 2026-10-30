@@ -44,7 +44,9 @@ describe('the SDK and the API spec', () => {
     await c.customers.get('cus_1');
     await c.customers.delete('cus_1');
     await c.customers.reset('cus_1', { return_url: 'https://a.example/x', state: 's' });
-    await c.customers.list({ limit: 5, starting_after: 'cus_1', external_ref: 'x' });
+    await c.customers.list({ limit: 5, starting_after: 'cus_1', external_ref: 'x', state: 'reset: enrolment needed' });
+    await c.resetContactText.get();
+    await c.resetContactText.set('Call us');
     await c.sessions.create({ customer: 'cus_1', purpose: 'enrol', return_url: 'https://a.example/x', state: 's' });
     await c.sessions.retrieve('ses_1');
     await c.records.list({ customer: 'cus_1', limit: 5, starting_after: 'rec_1' });
@@ -57,8 +59,6 @@ describe('the SDK and the API spec', () => {
     await c.templates.replace('kyc', [{ name: 'b' }]);
     await c.templates.delete('kyc');
     await c.disclosureKeys.list();
-    await c.disclosureKeys.register('Key', 'cdv1-x25519-hkdf256-aes256gcm', 'AAAA');
-    await c.disclosureKeys.retire('dk_1');
     await c.disclosures.create({ record: 'rec_1', keys: ['a'], reason: 'r', disclosure_key_fingerprint: 'f' });
     await c.disclosures.get('dsc_1');
     await c.disclosures.list({ status: 'pending', limit: 5, starting_after: 'dsc_1' });

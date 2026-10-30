@@ -135,3 +135,20 @@ export function recoveryHolderDeclined(event: WebhookEvent): RecoveryHolderDecli
   if (event.type !== EVENT_RECOVERY_HOLDER_DECLINED) throw new Error(`not a ${EVENT_RECOVERY_HOLDER_DECLINED} event`);
   return event.data.object as RecoveryHolderDeclined;
 }
+
+export const EVENT_CUSTOMER_SIGN_IN_LIMIT_REACHED = 'customer.sign_in_limit_reached';
+
+/** The object of a customer.sign_in_limit_reached event: a customer used the last slot of an hourly sign-in limit. Metadata only. */
+export interface CustomerSignInLimitReached {
+  customer: string;
+  livemode: boolean;
+  brake: 'sign_in_finish' | 'keyring_read' | 'failed_assertion';
+  limit: number;
+  reached_at: string;
+}
+
+/** Reads the object of a customer.sign_in_limit_reached event. Throws for any other event type. */
+export function customerSignInLimitReached(event: WebhookEvent): CustomerSignInLimitReached {
+  if (event.type !== EVENT_CUSTOMER_SIGN_IN_LIMIT_REACHED) throw new Error(`not a ${EVENT_CUSTOMER_SIGN_IN_LIMIT_REACHED} event`);
+  return event.data.object as CustomerSignInLimitReached;
+}

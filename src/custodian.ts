@@ -14,6 +14,28 @@ export interface Customer {
   last_name?: string;
   name_confirmed: boolean;
   created_at: string;
+  /** When the customer last confirmed a reset. Missing if never. While `state` is `reset: enrolment needed`, the customer must enrol again. */
+  reset_at?: string;
+}
+
+/** Who started a reset, as the `customer.reset` webhook says it. */
+export type ResetInitiatedBy = 'business' | 'customer_request';
+
+/** The object of the `customer.reset_requested` webhook. The customer asked for a reset; nothing was deleted. At most 3 per customer per day. */
+export interface CustomerResetRequestedEvent {
+  id: string;
+  external_ref: string;
+  livemode: boolean;
+  requested_at: string;
+}
+
+/** The object of the `customer.reset` webhook. `initiated_by` is `customer_request` if a `customer.reset_requested` came before for this customer. */
+export interface CustomerResetEvent {
+  id: string;
+  external_ref: string;
+  livemode: boolean;
+  reset_at: string;
+  initiated_by: ResetInitiatedBy;
 }
 export interface CustomerPage {
   data: Customer[];
@@ -218,7 +240,7 @@ export class Custodian {
      */
     reset: (id: string, params: { return_url: string; state: string }, options?: RequestOptions): Promise<Session> =>
       this.#client.request('POST', `/customers/${enc(id)}/reset`, params, options),
-    list: (params: { limit?: number; starting_after?: string; external_ref?: string } = {}): Promise<CustomerPage> =>
+    list: (params: { limit?: number; starting_after?: string; external_ref?: string; state?: 'active' | 'reset: enrolment needed' } = {}): Promise<CustomerPage> =>
       this.#client.request('GET', '/customers' + query(params)),
   };
 
@@ -245,13 +267,9 @@ export class Custodian {
     },
   };
 
+  /** Keys are registered and retired in the Console, where a member confirms with a code. This API cannot change them. */
   readonly disclosureKeys = {
     list: async (): Promise<RegisteredDisclosureKey[]> => (await this.#client.request<{ data: RegisteredDisclosureKey[] }>('GET', '/disclosure-keys')).data,
-    /** Registers a public key, base64 encoded. It is active at once and the key it replaces keeps working for the grace period. */
-    register: (name: string, suite: string, publicKey: string, options?: RequestOptions): Promise<RegisteredDisclosureKey> =>
-      this.#client.request('POST', '/disclosure-keys', { name, suite, public_key: publicKey }, options),
-    /** Stops a key at once and cancels the requests that wait for it. */
-    retire: (id: string): Promise<RegisteredDisclosureKey> => this.#client.request('POST', `/disclosure-keys/${enc(id)}/retire`),
   };
 
   readonly disclosures = {
@@ -270,6 +288,13 @@ export class Custodian {
   readonly recoveryPolicy = {
     get: (): Promise<{ recovery_threshold: number }> => this.#client.request('GET', '/recovery-policy'),
     set: (threshold: number): Promise<{ recovery_threshold: number }> => this.#client.request('PUT', '/recovery-policy', { recovery_threshold: threshold }),
+  };
+
+  /** The text a customer reads after they ask you for a reset. The default is "Contact the business that gave you this link". */
+  readonly resetContactText = {
+    get: (): Promise<{ text: string }> => this.#client.request('GET', '/reset-contact-text'),
+    /** Plain text, 1 to 200 characters. The customer always has the button to ask; you cannot turn it off. */
+    set: (text: string): Promise<{ text: string }> => this.#client.request('PUT', '/reset-contact-text', { text }),
   };
 
   readonly webhookEndpoints = {
