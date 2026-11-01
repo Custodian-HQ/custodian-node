@@ -140,3 +140,17 @@ describe('customers.createNamed', () => {
     expect(sent).toEqual({ external_ref: 'ref', first_name: 'Amina', last_name: 'Okafor' });
   });
 });
+
+describe('audit events', () => {
+  it('carry every field of the spec', async () => {
+    const body = { data: [{ id: 7, type: 'business.suspended', occurred_at: '2026-10-29T10:00:00Z', staff: true }, { id: 8, type: 'api_key.created', occurred_at: '2026-10-29T11:00:00Z', user: 'usr_1', user_email: 'a@example.com', api_key_label: 'cdv_test_Qa7x…m2Lp', livemode: false, api_key: 'key_1' }], total: 2 };
+    const fetchStub: typeof fetch = async () => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    const c = new Custodian('k', { baseUrl: 'https://api.test/vault/v1', fetch: fetchStub });
+    const [staff, api] = await c.auditEvents();
+    expect(staff?.staff).toBe(true);
+    expect(staff?.user_email).toBeUndefined();
+    expect(api?.user_email).toBe('a@example.com');
+    expect(api?.api_key_label).toBe('cdv_test_Qa7x…m2Lp');
+    expect(api?.livemode).toBe(false);
+  });
+});

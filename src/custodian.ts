@@ -145,6 +145,12 @@ export interface AuditEvent {
   type: string;
   occurred_at: string;
   user?: string;
+  user_email?: string;
+  /** True when Custodian staff caused the event. `user` and `user_email` are empty then. */
+  staff?: boolean;
+  api_key_label?: string;
+  /** Missing for a change to the whole organization. */
+  livemode?: boolean;
   api_key?: string;
   payload?: Record<string, unknown>;
 }

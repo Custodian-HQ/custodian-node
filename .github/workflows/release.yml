@@ -1,0 +1,36 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+      - name: Trusted publishing needs npm 11.5.1 or later
+        run: npm install -g npm@^11.5.1
+      - run: npm ci
+      - run: npm run check
+      - name: The tag must match the package and API spec versions
+        run: node scripts/check-version.mjs "$GITHUB_REF_NAME"
+      - run: npm audit signatures
+      - run: npm pack --dry-run
+      - name: Publish (no token: npm trusts this workflow)
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) npm publish --access public --tag beta ;;
+            *)   npm publish --access public ;;
+          esac
+      - name: GitHub release
+        run: |
+          case "$GITHUB_REF_NAME" in *-*) flag=--prerelease ;; *) flag= ;; esac
+          gh release create "$GITHUB_REF_NAME" --generate-notes $flag
+        env:
+          GH_TOKEN: ${{ github.token }}

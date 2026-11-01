@@ -44,7 +44,7 @@ Review the diff. The tests fail if any fixture differs from the manifest, or the
 
 ## Licence
 
-None chosen yet.
+MIT. See `LICENSE`.
 
 ## Check who signed a disclosure
 

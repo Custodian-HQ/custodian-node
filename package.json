@@ -1,8 +1,16 @@
 {
-  "name": "@custodian/vault-node",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@custodian-hq/vault-node",
+  "version": "1.0.0-beta",
   "description": "Node SDK for Custodian Data Vault",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Custodian-HQ/custodian-node.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "type": "module",
   "engines": {
     "node": ">=24.15.0"
@@ -21,7 +29,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build && node scripts/check-version.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
