@@ -1,10 +1,12 @@
 // The Custodian Data Vault client, with a method for every operation of the business API.
 import { Client, type ClientOptions, type RequestOptions } from './client.js';
+import type { CustomerState, DisclosureKeyStatus, DisclosureStatus, Purpose, SessionStatus, WebhookDeliveryStatus, WebhookEndpointStatus } from './enums.js';
 
 export interface Customer {
   id: string;
   external_ref: string;
   livemode: boolean;
+  /** `CustomerState.Active`, or `CustomerState.ResetEnrolmentNeeded` after a reset. A newer API can send a state this library does not know: use `isCustomerState` to check. */
   state: string;
   enrolled: boolean;
   /** The customer's public signing key, base64url. Keep the one from the customer.enrolled webhook and check envelopes against that; do not rely on this field alone. */
@@ -50,9 +52,9 @@ export interface Key {
   /** File keys only: the MIME types the key takes. Leave it out to take every type the server allows. */
   accept?: string[];
 }
-export type Purpose = 'enrol' | 'entry' | 'view' | 'approve' | 'recover' | 'recovery_settings' | 'reset' | 'delete' | 'holder';
 export interface CreateSessionParams {
   customer: string;
+  /** What the session is for. Use `Purpose`, for example `Purpose.Enrol`. */
   purpose: Purpose;
   /** One of the addresses you registered for the key's mode. */
   return_url: string;
@@ -67,8 +69,10 @@ export interface CreateSessionParams {
 export interface Session {
   id: string;
   customer: string;
+  /** What the session is for. A newer API can send a purpose this library does not know: use `isPurpose` to check. */
   purpose: string;
-  status: 'created' | 'exchanged' | 'completed' | 'cancelled' | 'expired';
+  /** Where the session is. A newer API can send a status this library does not know: use `isSessionStatus` to check. */
+  status: SessionStatus;
   livemode: boolean;
   return_url: string;
   state: string;
@@ -113,17 +117,15 @@ export interface WebhookEndpoint {
   url: string;
   events: string[];
   livemode: boolean;
-  status: 'enabled' | 'disabled';
+  status: WebhookEndpointStatus;
   created_at: string;
-  /** Only when the endpoint is made or its secret is rotated. Store it then. */
-  secret?: string;
 }
 export interface WebhookDelivery {
   id: number;
   endpoint: string;
   event: string;
   type: string;
-  status: 'pending' | 'retrying' | 'delivered' | 'failed';
+  status: WebhookDeliveryStatus;
   attempts: number;
   last_status?: number;
   last_error?: string;
@@ -172,7 +174,7 @@ export interface RegisteredDisclosureKey {
   public_key: string;
   fingerprint: string;
   fingerprint_short: string;
-  status: 'active' | 'retiring' | 'retired';
+  status: DisclosureKeyStatus;
   livemode: boolean;
   registered_at: string;
   retires_at: string | null;
@@ -190,8 +192,6 @@ export interface CreateDisclosureParams {
   /** The fingerprint of your disclosure key. */
   disclosure_key_fingerprint: string;
 }
-
-export type DisclosureStatus = 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
 
 /** A request to see named keys of one record. It holds names only, never values. */
 export interface Disclosure {
@@ -246,7 +246,7 @@ export class Custodian {
      */
     reset: (id: string, params: { return_url: string; state: string }, options?: RequestOptions): Promise<Session> =>
       this.#client.request('POST', `/customers/${enc(id)}/reset`, params, options),
-    list: (params: { limit?: number; starting_after?: string; external_ref?: string; state?: 'active' | 'reset: enrolment needed' } = {}): Promise<CustomerPage> =>
+    list: (params: { limit?: number; starting_after?: string; external_ref?: string; state?: CustomerState } = {}): Promise<CustomerPage> =>
       this.#client.request('GET', '/customers' + query(params)),
   };
 
@@ -303,17 +303,9 @@ export class Custodian {
     set: (text: string): Promise<{ text: string }> => this.#client.request('PUT', '/reset-contact-text', { text }),
   };
 
+  /** A member makes, changes, deletes and rotates endpoints in the Console only. With an API key you can only list them. */
   readonly webhookEndpoints = {
-    create: (url: string, events: string[], options?: RequestOptions): Promise<WebhookEndpoint> =>
-      this.#client.request('POST', '/webhook-endpoints', { url, events }, options),
     list: async (): Promise<WebhookEndpoint[]> => (await this.#client.request<{ data: WebhookEndpoint[] }>('GET', '/webhook-endpoints')).data,
-    update: (id: string, changes: { url?: string; events?: string[]; status?: 'enabled' | 'disabled' }): Promise<WebhookEndpoint> =>
-      this.#client.request('PUT', `/webhook-endpoints/${enc(id)}`, changes),
-    delete: async (id: string): Promise<void> => {
-      await this.#client.request('DELETE', `/webhook-endpoints/${enc(id)}`);
-    },
-    /** The old secret stops working at once. */
-    rotateSecret: (id: string): Promise<WebhookEndpoint> => this.#client.request('POST', `/webhook-endpoints/${enc(id)}/rotate-secret`),
   };
 
   readonly webhookDeliveries = {

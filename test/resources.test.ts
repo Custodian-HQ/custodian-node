@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { Custodian } from '../src/custodian.js';
+import { Purpose } from '../src/enums.js';
 
 /** "METHOD /path" for every operation in the vendored business API spec, as a pattern. */
 function specOperations(): Map<string, RegExp> {
@@ -47,7 +48,7 @@ describe('the SDK and the API spec', () => {
     await c.customers.list({ limit: 5, starting_after: 'cus_1', external_ref: 'x', state: 'reset: enrolment needed' });
     await c.resetContactText.get();
     await c.resetContactText.set('Call us');
-    await c.sessions.create({ customer: 'cus_1', purpose: 'enrol', return_url: 'https://a.example/x', state: 's' });
+    await c.sessions.create({ customer: 'cus_1', purpose: Purpose.Enrol, return_url: 'https://a.example/x', state: 's' });
     await c.sessions.retrieve('ses_1');
     await c.records.list({ customer: 'cus_1', limit: 5, starting_after: 'rec_1' });
     await c.records.get('rec_1');
@@ -65,11 +66,7 @@ describe('the SDK and the API spec', () => {
     await c.disclosures.cancel('dsc_1');
     await c.recoveryPolicy.get();
     await c.recoveryPolicy.set(3);
-    await c.webhookEndpoints.create('https://a.example/h', ['*']);
     await c.webhookEndpoints.list();
-    await c.webhookEndpoints.update('we_1', { events: ['*'] });
-    await c.webhookEndpoints.delete('we_1');
-    await c.webhookEndpoints.rotateSecret('we_1');
     await c.webhookDeliveries.list({ endpoint: 'we_1', limit: 5, starting_after: 9 });
     await c.webhookDeliveries.retry(7);
     await c.usage();
