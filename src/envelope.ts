@@ -25,8 +25,10 @@ export interface Expected {
   customerId: string;
   /** The id of your disclosure key that the request was made with. */
   kid: string;
-  /** The key names you asked for. The envelope must hold exactly these. */
+  /** The value key names you asked for. The envelope must hold exactly these. */
   keys: string[];
+  /** The file key names you asked for. The envelope must hold exactly these. Leave it out if you asked for no file. */
+  files?: string[];
   /** The customer's public vault-sign key, 32 bytes. Use the one you kept from the customer.enrolled webhook. */
   signKey: Buffer;
   suite: Suite;
@@ -34,17 +36,30 @@ export interface Expected {
   privateKey: Buffer;
 }
 
+/** The key of one approved file. It opens that file only. Use the file, then discard the key: the customer cannot take it back. */
+export interface FileGrant {
+  fileId: string;
+  key: Buffer;
+}
+
 export interface Opened {
+  requestId: string;
+  businessId: string;
+  customerId: string;
   /** The token of the record the values came from. */
   record: string;
   approvedAt: number;
   fields: Record<string, string>;
+  /** One grant for each file you asked for. Download and open a file with `receiveFile`. */
+  files: Record<string, FileGrant>;
 }
 
 const ENVELOPE_FIELDS = ['v', 'suite', 'request_id', 'business_id', 'customer_id', 'kid', 'enc', 'commit', 'ct', 'sig'];
 const SIGNATURE_LABEL = Buffer.from('cdv/v1/sig-disclosure');
 const INFO_LABEL = Buffer.from('cdv/v1/disclosure');
 const SPKI_ED25519 = Buffer.from('302a300506032b6570032100', 'hex');
+/** The key id of every file key: the first 8 bytes of SHA-256("cdv/v1/file-key"). */
+export const FILE_KEY_ID = crypto.createHash('sha256').update('cdv/v1/file-key').digest().subarray(0, 8);
 
 // ---- A small deterministic CBOR: what an envelope needs, and nothing else. -------------------------------------------------------------
 
@@ -68,7 +83,7 @@ function encodeMap(pairs: [Buffer, Buffer][]): Buffer {
   return Buffer.concat([head(5, sorted.length), ...sorted.flatMap(([k, v]) => [k, v])]);
 }
 
-type Item = { kind: 'n'; n: number } | { kind: 's'; s: string } | { kind: 'm'; m: [string, Item][] };
+type Item = { kind: 'n'; n: number } | { kind: 's'; s: string } | { kind: 'b'; b: Buffer } | { kind: 'm'; m: [string, Item][] };
 
 class Reader {
   #at = 0;
@@ -97,6 +112,7 @@ class Reader {
     const major = first >> 5;
     const n = this.#argument(first & 31);
     if (major === 0) return { kind: 'n', n };
+    if (major === 2) return { kind: 'b', b: Buffer.from(this.#take(n)) };
     if (major === 3) {
       const raw = this.#take(n);
       try {
@@ -178,7 +194,7 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
   if (!signed) throw new EnvelopeError('signature', 'the signature does not check');
 
   // Key names are ASCII, so sorting the strings sorts their bytes.
-  const names = [...want.keys].sort();
+  const names = [...want.keys, ...(want.files ?? [])].sort();
   const aad = Buffer.concat([head(4, names.length), ...names.map(text)]);
   const info = Buffer.concat([INFO_LABEL, Buffer.from([0]), Buffer.from(w['business_id'] as string), Buffer.from([0]), Buffer.from(w['request_id'] as string)]);
   let plain: Buffer;
@@ -187,7 +203,11 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
   } catch (error) {
     throw new EnvelopeError('payload', error instanceof Error ? error.message : 'the sealed content cannot be opened');
   }
-  return readPayload(plain, want);
+  try {
+    return readPayload(plain, want);
+  } finally {
+    plain.fill(0);
+  }
 }
 
 function readPayload(plain: Buffer, want: Expected): Opened {
@@ -196,7 +216,8 @@ function readPayload(plain: Buffer, want: Expected): Opened {
   };
   const root = decodePayload(plain);
   if (root.kind !== 'm') return bad('the sealed content is not a map');
-  const out: Opened = { record: '', approvedAt: -1, fields: {} };
+  const out: Opened = { requestId: want.requestId, businessId: want.businessId, customerId: want.customerId, record: '', approvedAt: -1, fields: {}, files: {} };
+  const askedFiles = want.files ?? [];
   const seen = new Set<string>();
   for (const [key, value] of root.m) {
     seen.add(key);
@@ -215,10 +236,27 @@ function readPayload(plain: Buffer, want: Expected): Opened {
           if (field.kind !== 's') bad('a value is not text');
           else out.fields[name] = field.s;
         }
+    } else if (key === 'files') {
+      if (value.kind !== 'm' || askedFiles.length === 0) bad('files that were not asked for');
+      else for (const [name, grant] of value.m) out.files[name] = readGrant(grant);
     } else bad('an unknown field in the sealed content');
   }
   if (!['request_id', 'record', 'approved_at', 'fields'].every((k) => seen.has(k))) bad('a field is missing');
-  const names = Object.keys(out.fields).sort();
-  if (names.length !== want.keys.length || names.join('\0') !== [...want.keys].sort().join('\0')) bad('the sealed content does not hold the keys that were asked for');
+  if (!sameNames(Object.keys(out.fields), want.keys) || !sameNames(Object.keys(out.files), askedFiles) || want.keys.some((k) => askedFiles.includes(k))) {
+    bad('the sealed content does not hold the keys that were asked for');
+  }
   return out;
+}
+
+const sameNames = (got: string[], asked: string[]): boolean => got.length === asked.length && [...got].sort().join('\0') === [...asked].sort().join('\0');
+
+function readGrant(item: Item): FileGrant {
+  const bad = (): never => {
+    throw new EnvelopeError('payload', 'a file grant is not valid');
+  };
+  if (item.kind !== 'm' || item.m.length !== 3) return bad();
+  const got = Object.fromEntries(item.m);
+  const [id, key, keyId] = [got['file_id'], got['key'], got['key_id']];
+  if (id?.kind !== 's' || id.s === '' || key?.kind !== 'b' || key.b.length !== 32 || keyId?.kind !== 'b' || !keyId.b.equals(FILE_KEY_ID)) return bad();
+  return { fileId: id.s, key: key.b };
 }

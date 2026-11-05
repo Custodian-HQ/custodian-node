@@ -2,7 +2,8 @@ export { APIError, Client, DEFAULT_BASE_URL, type ClientOptions, type RequestOpt
 export { SUITE_CLASSIC, SUITE_HYBRID, defaultSuite, fingerprint, generateKey, open, type DisclosureKey, type Sealed, type Suite } from './disclosure.js';
 export { hybridSupported } from './hpke.js';
 export { approveUrl, parseReturn } from './return.js';
-export { EnvelopeError, openEnvelope, type EnvelopeErrorCode, type Expected, type Opened } from './envelope.js';
+export { EnvelopeError, FILE_KEY_ID, openEnvelope, type EnvelopeErrorCode, type Expected, type FileGrant, type Opened } from './envelope.js';
+export { FileError, openFile, receiveFile, type FileContext, type FileErrorCode } from './file.js';
 export { KeyStoreError, MemoryKeyStore, observe, openEnvelopeFor, type KeyStore, type KeyStoreErrorCode } from './keystore.js';
 export { Custodian } from './custodian.js';
 export {
@@ -21,5 +22,5 @@ export {
   isWebhookDeliveryStatus,
   isWebhookEndpointStatus,
 } from './enums.js';
-export type { AuditEvent, CustomerRecord, KeySummary, RecordPage, CreateDisclosureParams, CreateSessionParams, Customer, CustomerPage, CustomerResetEvent, CustomerResetRequestedEvent, Disclosure, DisclosurePage, Key, RegisteredDisclosureKey, ResetInitiatedBy, Session, Template, Usage, WebhookDelivery, WebhookEndpoint } from './custodian.js';
+export type { AuditEvent, ByteRange, CustomerRecord, DisclosedFile, KeySummary, RecordPage, CreateDisclosureParams, CreateSessionParams, Customer, CustomerPage, CustomerResetEvent, CustomerResetRequestedEvent, Disclosure, DisclosurePage, Key, RegisteredDisclosureKey, ResetInitiatedBy, Session, Template, Usage, WebhookDelivery, WebhookEndpoint } from './custodian.js';
 export { DEFAULT_TOLERANCE_SECONDS, EVENT_CUSTOMER_SIGN_IN_LIMIT_REACHED, EVENT_RECOVERY_ACTION_REQUIRED, EVENT_RECOVERY_HOLDER_DECLINED, EVENT_RECOVERY_STATUS_CHANGED, SIGNATURE_HEADER, WebhookError, constructEvent, customerSignInLimitReached, recoveryActionRequired, recoveryHolderDeclined, recoveryStatusChanged, verify, type CustomerSignInLimitReached, type RecoveryActionRequired, type RecoveryHolderDeclined, type RecoveryStatusChanged, type VerifyOptions, type WebhookEvent } from './webhook.js';

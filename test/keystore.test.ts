@@ -10,12 +10,13 @@ interface Case {
   customer_id: string;
   request_id: string;
   vault_sign_public_key_hex: string;
-  keys: string[];
+  keys: string[] | null;
+  files?: string[];
   envelope: Record<string, unknown>;
 }
 const cases = (JSON.parse(fs.readFileSync('test/fixtures/v1/disclosure-envelope.json', 'utf8')) as { cases: Case[] }).cases;
 const want = (c: Case): Omit<Expected, 'signKey'> => ({
-  requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, kid: c.kid, keys: c.keys, suite: c.suite as Expected['suite'], privateKey: Buffer.from(c.business_private_key_hex, 'hex'),
+  requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, kid: c.kid, keys: c.keys ?? [], files: c.files ?? [], suite: c.suite as Expected['suite'], privateKey: Buffer.from(c.business_private_key_hex, 'hex'),
 });
 const enrolled = (id: string, key: Buffer) => ({ type: 'customer.enrolled', data: { object: { id, livemode: true, vault_sign_key: key.toString('base64url'), mk_epoch: 1 } } });
 const codeOf = async (run: () => Promise<unknown>): Promise<string> => {
@@ -34,7 +35,8 @@ describe('the key store', () => {
     expect(await codeOf(() => openEnvelopeFor(store, c.envelope, want(c)))).toBe('no_key');
     await observe(store, enrolled(c.customer_id, Buffer.from(c.vault_sign_public_key_hex, 'hex')));
     const opened = await openEnvelopeFor(store, c.envelope, want(c));
-    expect(Object.keys(opened.fields).sort()).toEqual([...c.keys].sort());
+    expect(Object.keys(opened.fields).sort()).toEqual([...(c.keys ?? [])].sort());
+    expect(Object.keys(opened.files).sort()).toEqual([...(c.files ?? [])].sort());
   });
 
   it('refuses another key for a known customer until a reset or a deletion', async () => {

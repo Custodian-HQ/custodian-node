@@ -54,6 +54,15 @@ export class Client {
     if (!response.ok) throw parseError(response.status, text);
     return (text === '' ? undefined : JSON.parse(text)) as T;
   }
+
+  /** Sends a GET and gives back the answer without reading its body, for a download. An error answer is read and thrown. */
+  async stream(path: string, headers: Record<string, string> = {}, options: RequestOptions = {}): Promise<Response> {
+    const init: RequestInit = { method: 'GET', headers: { ...headers, Authorization: `Bearer ${this.#apiKey}`, Accept: 'application/octet-stream, application/json' } };
+    if (options.signal) init.signal = options.signal;
+    const response = await this.#fetch(this.#baseUrl + path, init);
+    if (!response.ok) throw parseError(response.status, await response.text());
+    return response;
+  }
 }
 
 function parseError(status: number, text: string): APIError {

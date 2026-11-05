@@ -1,5 +1,5 @@
 // The Custodian Data Vault client, with a method for every operation of the business API.
-import { Client, type ClientOptions, type RequestOptions } from './client.js';
+import { APIError, Client, type ClientOptions, type RequestOptions } from './client.js';
 import type { CustomerState, DisclosureKeyStatus, DisclosureStatus, Purpose, SessionStatus, WebhookDeliveryStatus, WebhookEndpointStatus } from './enums.js';
 
 export interface Customer {
@@ -209,7 +209,20 @@ export interface Disclosure {
   acked_at: string | null;
   /** True while you can still fetch the envelope. */
   envelope_ready: boolean;
+  /** The file keys the customer approved, with the size of each stored file. Empty unless the request is approved and `envelope_ready` is true. */
+  files?: DisclosedFile[];
   created_at: string;
+}
+
+export interface DisclosedFile {
+  key: string;
+  size_bytes: number;
+}
+
+/** A byte range of the encrypted file. `end` is included; leave it out to read to the end. */
+export interface ByteRange {
+  start: number;
+  end?: number;
 }
 
 export interface DisclosurePage {
@@ -289,6 +302,32 @@ export class Custodian {
     envelope: (id: string): Promise<Record<string, unknown>> => this.#client.request('GET', `/disclosures/${enc(id)}/envelope`),
     /** Tells the vault that you have the envelope and opened it. The vault deletes it. Safe to call twice. */
     acknowledge: (id: string): Promise<Disclosure> => this.#client.request('POST', `/disclosures/${enc(id)}/ack`),
+    /**
+     * Downloads an approved file, still encrypted, as a stream. Open it with `openFile` and the grant from the envelope, or use
+     * `receiveFile` for both steps. It works only until you acknowledge the envelope, or for 15 minutes after approval.
+     */
+    downloadFile: async (id: string, key: string, options: { range?: ByteRange; signal?: AbortSignal } = {}): Promise<ReadableStream<Uint8Array>> => {
+      const headers: Record<string, string> = {};
+      const r = options.range;
+      if (r) {
+        if (!Number.isSafeInteger(r.start) || r.start < 0 || (r.end !== undefined && (!Number.isSafeInteger(r.end) || r.end < r.start))) throw new Error('custodian: the byte range is not valid');
+        headers['Range'] = `bytes=${r.start}-${r.end ?? ''}`;
+      }
+      let response: Response;
+      try {
+        response = await this.#client.stream(`/disclosures/${enc(id)}/files/${enc(key)}`, headers, options.signal ? { signal: options.signal } : {});
+      } catch (error) {
+        if (error instanceof APIError && error.code === 'file_replaced') {
+          throw new APIError(error.status, error.type, error.code, 'the customer replaced or removed this file after approving it: ask them again', error.requestId);
+        }
+        throw error;
+      }
+      if (!response.body || (r && response.status !== 206)) {
+        await response.body?.cancel();
+        throw new APIError(response.status, 'api_error', 'unexpected_response', r ? 'the server did not answer with the byte range' : 'the download has no body');
+      }
+      return response.body;
+    },
   };
 
   readonly recoveryPolicy = {

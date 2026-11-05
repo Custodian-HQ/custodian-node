@@ -13,15 +13,17 @@ interface Case {
   record: string;
   approved_at: number;
   vault_sign_public_key_hex: string;
-  keys: string[];
+  keys: string[] | null;
+  files?: string[];
   fields: Record<string, string>;
+  file_grants?: Record<string, { file_id: string; key_hex: string }>;
   envelope: Record<string, unknown>;
   refuse: { name: string; envelope: Record<string, unknown>; expected_override?: Record<string, unknown>; error: string }[];
 }
 const cases = (JSON.parse(fs.readFileSync('test/fixtures/v1/disclosure-envelope.json', 'utf8')) as { cases: Case[] }).cases;
 
 const expected = (c: Case): Expected => ({
-  requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, kid: c.kid, keys: c.keys,
+  requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, kid: c.kid, keys: c.keys ?? [], files: c.files ?? [],
   signKey: Buffer.from(c.vault_sign_public_key_hex, 'hex'), suite: c.suite, privateKey: Buffer.from(c.business_private_key_hex, 'hex'),
 });
 
@@ -41,7 +43,8 @@ describe.each(cases)('the envelope the browser sealed for $suite', (c) => {
 
   it_('opens, and gives back exactly the approved values', () => {
     const got = openEnvelope(c.envelope, expected(c));
-    expect(got).toEqual({ record: c.record, approvedAt: c.approved_at, fields: c.fields });
+    const files = Object.fromEntries(Object.entries(c.file_grants ?? {}).map(([name, g]) => [name, { fileId: g.file_id, key: Buffer.from(g.key_hex, 'hex') }]));
+    expect(got).toEqual({ requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, record: c.record, approvedAt: c.approved_at, fields: c.fields, files });
   });
 
   it_('refuses every change in the fixture for the right reason', () => {
@@ -54,6 +57,7 @@ describe.each(cases)('the envelope the browser sealed for $suite', (c) => {
       if (typeof o['kid'] === 'string') want.kid = o['kid'];
       if (typeof o['vault_sign_public_key_hex'] === 'string') want.signKey = Buffer.from(o['vault_sign_public_key_hex'], 'hex');
       if (Array.isArray(o['keys'])) want.keys = o['keys'] as string[];
+      if (Array.isArray(o['files'])) want.files = o['files'] as string[];
       expect(codeOf(() => openEnvelope(r.envelope, want)), `${c.name} / ${r.name}`).toBe(r.error);
     }
   });
@@ -64,6 +68,18 @@ describe.each(cases)('the envelope the browser sealed for $suite', (c) => {
     expect(codeOf(() => openEnvelope('{', expected(c)))).toBe('format');
     expect(codeOf(() => openEnvelope('[]', expected(c)))).toBe('format');
     expect(codeOf(() => openEnvelope(JSON.stringify(c.envelope), expected(c)))).toBe('opened');
+  });
+});
+
+describe('the fixture', () => {
+  it('has a mixed case and a file-only case', () => {
+    expect(cases.map((c) => c.name)).toEqual(expect.arrayContaining(['xwing-mixed', 'x25519-files-only']));
+  });
+
+  it('refuses files when none were asked for', () => {
+    const c = cases.find((x) => x.name === 'x25519-files-only')!;
+    // With no file names the AAD changes, so the seal itself refuses: still a payload error.
+    expect(codeOf(() => openEnvelope(c.envelope, { ...expected(c), files: [] }))).toBe('payload');
   });
 });
 

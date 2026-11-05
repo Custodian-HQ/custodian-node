@@ -54,6 +54,7 @@ describe('the SDK and the API spec', () => {
     await c.records.get('rec_1');
     await c.disclosures.envelope('dsc_1');
     await c.disclosures.acknowledge('dsc_1');
+    await c.disclosures.downloadFile('dsc_1', 'passport');
     await c.templates.list();
     await c.templates.create({ name: 'kyc', keys: [{ name: 'a' }] });
     await c.templates.get('kyc');

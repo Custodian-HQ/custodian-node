@@ -269,6 +269,39 @@ try {
 | `request`, `business`, `customer`, `key` | The envelope is for something else than you asked. |
 | `format`, `payload` | The envelope is damaged, or its content is not what the customer approved. |
 
+### Receive a file
+
+A file key, such as `passport`, is asked for like a value: put its name in `keys` when you create the request. To open the envelope,
+give the value names in `keys` and the file names in `files`. The envelope then holds one grant for each file: the file id and its key.
+The vault keeps the encrypted file. You download it and the library opens it as a stream, so a large file never sits in memory.
+
+```ts
+import { receiveFile } from '@custodian-hq/vault-node';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+
+const opened = await openEnvelopeFor(store, envelope, { ...expected, keys: ['full_name'], files: ['passport'] });
+
+// Download before you acknowledge: the download works only while the envelope exists (at most 15 minutes).
+const passport = await receiveFile(custodian, opened, 'passport');
+await pipeline(Readable.fromWeb(passport), fs.createWriteStream(tempPath));
+await custodian.disclosures.acknowledge(request.id);
+```
+
+- **Discard the key when you are done.** The key opens this one file only, and the customer cannot take it back. `receiveFile` clears
+  the key and removes it from `opened.files` when the stream ends. If you use `downloadFile` and `openFile` yourself, clear `grant.key`
+  with `grant.key.fill(0)`.
+- **Use the file only if the stream ends without an error.** A `FileError` means the file was changed or cut. Delete what you wrote.
+- **Check the file type again.** The customer chose the file. Do not trust its name or its first bytes until you check them yourself.
+- `410 file_replaced`: the customer replaced or removed the file after approving. Ask again. `429 busy`: try again in a moment; the
+  key is kept when the download is refused before it starts.
+
+| `FileError` code | What it means |
+|---|---|
+| `commitment` | The file was not made with this key. |
+| `open`, `truncated` | A chunk was changed, moved, added or removed, or the file is for another key name or record. |
+| `format`, `records`, `frame`, `too_long` | The file is damaged or was built to attack the reader. |
+
 ## 9. Handle errors
 
 Every failed API call throws an `APIError`.
