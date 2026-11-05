@@ -4,11 +4,20 @@ on:
   pull_request:
 jobs:
   check:
+    name: check (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The version in .nvmrc, and the oldest version the package says it supports.
+          - { name: .nvmrc, node-version-file: .nvmrc }
+          - { name: node 24.15.0, node-version: 24.15.0 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version: ${{ matrix.node-version }}
+          node-version-file: ${{ matrix.node-version-file }}
       - run: npm ci
       - run: npm run check

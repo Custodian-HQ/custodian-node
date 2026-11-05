@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { Custodian } from '../src/custodian.js';
+import { Custodian, type Customer, type Disclosure, type Session, type WebhookDelivery } from '../src/custodian.js';
 import {
   CustomerState,
   DisclosureKeyStatus,
@@ -76,5 +76,25 @@ describe('the enums', () => {
     expect(JSON.parse(body).purpose).toBe('recovery_settings');
     expect(session.purpose).toBe(Purpose.RecoverySettings);
     expect(session.status).toBe(SessionStatus.Created);
+  });
+});
+
+describe('a value from a newer API', () => {
+  // These lines are checked by the compiler: an enum field must take any text, and a guard must narrow it to the known values.
+  it('fits in every enum field of an answer, and the guards still tell it apart', () => {
+    const fromNewerApi = 'a_value_from_a_newer_api';
+    const session: Pick<Session, 'status' | 'purpose'> = { status: fromNewerApi, purpose: fromNewerApi };
+    const customer: Pick<Customer, 'state'> = { state: fromNewerApi };
+    const disclosure: Pick<Disclosure, 'status'> = { status: fromNewerApi };
+    const delivery: Pick<WebhookDelivery, 'status'> = { status: fromNewerApi };
+    expect([session.status, session.purpose, customer.state, disclosure.status, delivery.status].every((v) => v === fromNewerApi)).toBe(true);
+    expect(isSessionStatus(session.status)).toBe(false);
+    expect(isCustomerState(customer.state)).toBe(false);
+
+    const known: Pick<Session, 'status'> = { status: SessionStatus.Completed };
+    if (isSessionStatus(known.status)) {
+      const narrowed: SessionStatus = known.status;
+      expect(narrowed).toBe('completed');
+    } else expect.unreachable();
   });
 });

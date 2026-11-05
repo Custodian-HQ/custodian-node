@@ -3,6 +3,7 @@
 // It checks the shape, the request, the business, the customer, the key and the suite; then the customer's signature over everything; then
 // the key commitment; then that the sealed content names the same request and holds exactly the keys that were asked for.
 import crypto from 'node:crypto';
+import { decodeBase64Url } from './base64url.js';
 import { open as openSealed, SUITE_CLASSIC, SUITE_HYBRID, type Suite } from './disclosure.js';
 
 export type EnvelopeErrorCode = 'format' | 'request' | 'business' | 'customer' | 'key' | 'signature' | 'payload';
@@ -49,8 +50,9 @@ export interface Opened {
   /** The token of the record the values came from. */
   record: string;
   approvedAt: number;
+  /** The approved values by key name. The object has no prototype, so a key may have any name. */
   fields: Record<string, string>;
-  /** One grant for each file you asked for. Download and open a file with `receiveFile`. */
+  /** One grant for each file you asked for. Download and open a file with `receiveFile`. The object has no prototype. */
   files: Record<string, FileGrant>;
 }
 
@@ -58,7 +60,7 @@ const ENVELOPE_FIELDS = ['v', 'suite', 'request_id', 'business_id', 'customer_id
 const SIGNATURE_LABEL = Buffer.from('cdv/v1/sig-disclosure');
 const INFO_LABEL = Buffer.from('cdv/v1/disclosure');
 const SPKI_ED25519 = Buffer.from('302a300506032b6570032100', 'hex');
-/** The key id of every file key: the first 8 bytes of SHA-256("cdv/v1/file-key"). */
+/** The key id of every file key: the first 8 bytes of SHA-256("cdv/v1/file-key"). Not exported from the package. */
 export const FILE_KEY_ID = crypto.createHash('sha256').update('cdv/v1/file-key').digest().subarray(0, 8);
 
 // ---- A small deterministic CBOR: what an envelope needs, and nothing else. -------------------------------------------------------------
@@ -87,6 +89,8 @@ type Item = { kind: 'n'; n: number } | { kind: 's'; s: string } | { kind: 'b'; b
 
 class Reader {
   #at = 0;
+  /** Every byte string the reader copied out, so a failure can wipe them. */
+  readonly copies: Buffer[] = [];
   constructor(private readonly b: Buffer) {}
   #fail(): never {
     throw new EnvelopeError('payload', 'the sealed content is not deterministic CBOR');
@@ -112,7 +116,11 @@ class Reader {
     const major = first >> 5;
     const n = this.#argument(first & 31);
     if (major === 0) return { kind: 'n', n };
-    if (major === 2) return { kind: 'b', b: Buffer.from(this.#take(n)) };
+    if (major === 2) {
+      const copy = Buffer.from(this.#take(n));
+      this.copies.push(copy);
+      return { kind: 'b', b: copy };
+    }
     if (major === 3) {
       const raw = this.#take(n);
       try {
@@ -143,8 +151,8 @@ class Reader {
   }
 }
 
-function decodePayload(plain: Buffer): Item {
-  const reader = new Reader(plain);
+/** Reads one item of deterministic CBOR from `plain`. Exported for the tests, not from the package. */
+export function decodePayload(plain: Buffer, reader = new Reader(plain)): Item {
   const item = reader.item();
   if (!reader.done()) throw new EnvelopeError('payload', 'the sealed content has bytes after the item');
   return item;
@@ -153,8 +161,9 @@ function decodePayload(plain: Buffer): Item {
 // ---------------------------------------------------------------------------------------------------------------------------------------
 
 const strictBase64Url = (value: unknown): Buffer => {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) throw new EnvelopeError('format', 'a field is not base64url');
-  return Buffer.from(value, 'base64url');
+  const bytes = typeof value === 'string' ? decodeBase64Url(value) : undefined;
+  if (!bytes) throw new EnvelopeError('format', 'a field is not base64url');
+  return bytes;
 };
 
 /**
@@ -210,13 +219,25 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
   }
 }
 
-function readPayload(plain: Buffer, want: Expected): Opened {
+/** Reads the sealed content. If it is refused, every file key it copied is cleared first. */
+export function readPayload(plain: Buffer, want: Expected): Opened {
+  const reader = new Reader(plain);
+  try {
+    return parsePayload(plain, want, reader);
+  } catch (error) {
+    for (const copy of reader.copies) copy.fill(0);
+    throw error;
+  }
+}
+
+function parsePayload(plain: Buffer, want: Expected, reader: Reader): Opened {
   const bad = (m: string): never => {
     throw new EnvelopeError('payload', m);
   };
-  const root = decodePayload(plain);
+  const root = decodePayload(plain, reader);
   if (root.kind !== 'm') return bad('the sealed content is not a map');
-  const out: Opened = { requestId: want.requestId, businessId: want.businessId, customerId: want.customerId, record: '', approvedAt: -1, fields: {}, files: {} };
+  // No prototype: a name such as `__proto__` is then an ordinary key that is counted, as in Go.
+  const out: Opened = { requestId: want.requestId, businessId: want.businessId, customerId: want.customerId, record: '', approvedAt: -1, fields: Object.create(null) as Record<string, string>, files: Object.create(null) as Record<string, FileGrant> };
   const askedFiles = want.files ?? [];
   const seen = new Set<string>();
   for (const [key, value] of root.m) {

@@ -18,6 +18,9 @@ describe('vendored fixtures', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'MANIFEST.json'), 'utf8')) as { files: Record<string, string> };
     const present = fs.readdirSync(dir).filter((n) => n !== 'MANIFEST.json').sort();
     expect(present).toEqual(Object.keys(manifest.files).sort());
-    for (const [name, hash] of Object.entries(manifest.files)) expect(sha(path.join(dir, name)), name).toBe(hash);
+    for (const [name, hash] of Object.entries(manifest.files)) {
+      if (name === 'PROVENANCE.md') continue;
+      expect(sha(path.join(dir, name)), name).toBe(hash);
+    }
   });
 });

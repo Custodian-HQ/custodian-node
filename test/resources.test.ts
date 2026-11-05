@@ -152,3 +152,76 @@ describe('audit events', () => {
     expect(api?.livemode).toBe(false);
   });
 });
+
+describe('what each call sends', () => {
+  interface Sent { method: string; path: string; query: Record<string, string>; body: unknown; idempotent: boolean }
+  async function sends(call: (c: Custodian) => Promise<unknown>): Promise<Sent> {
+    let sent: Sent | undefined;
+    const fetchStub: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const headers = init?.headers as Record<string, string>;
+      sent = {
+        method: init?.method ?? 'GET',
+        path: url.pathname.replace('/vault/v1', ''),
+        query: Object.fromEntries(url.searchParams),
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+        idempotent: headers['Idempotency-Key'] !== undefined,
+      };
+      return new Response(sent.method === 'DELETE' || sent.path.endsWith('/retry') ? null : '{"data":[]}', { status: sent.method === 'DELETE' || sent.path.endsWith('/retry') ? 204 : 200 });
+    };
+    await call(new Custodian('k', { baseUrl: 'https://api.test/vault/v1', fetch: fetchStub }));
+    return sent!;
+  }
+
+  it('sends the reset of a customer, with its return address and state', async () => {
+    expect(await sends((c) => c.customers.reset('cus_1', { return_url: 'https://a.example/x', state: 's1' }))).toEqual({
+      method: 'POST', path: '/customers/cus_1/reset', query: {}, body: { return_url: 'https://a.example/x', state: 's1' }, idempotent: true,
+    });
+  });
+
+  it('sends the contact text, the templates and the recovery threshold in the shape of the spec', async () => {
+    expect(await sends((c) => c.resetContactText.set('Call us'))).toMatchObject({ method: 'PUT', path: '/reset-contact-text', body: { text: 'Call us' }, idempotent: false });
+    expect(await sends((c) => c.templates.create({ name: 'kyc', keys: [{ name: 'a', type: 'text' }] }))).toMatchObject({ method: 'POST', path: '/templates', body: { name: 'kyc', keys: [{ name: 'a', type: 'text' }] }, idempotent: true });
+    expect(await sends((c) => c.templates.replace('my kyc', [{ name: 'b' }]))).toMatchObject({ method: 'PUT', path: '/templates/my%20kyc', body: { keys: [{ name: 'b' }] } });
+    expect(await sends((c) => c.recoveryPolicy.set(3))).toMatchObject({ method: 'PUT', path: '/recovery-policy', body: { recovery_threshold: 3 } });
+  });
+
+  it('sends the disclosure calls that have no body', async () => {
+    for (const [call, path] of [
+      [(c: Custodian) => c.disclosures.cancel('dsc_1'), '/disclosures/dsc_1/cancel'],
+      [(c: Custodian) => c.disclosures.acknowledge('dsc_1'), '/disclosures/dsc_1/ack'],
+    ] as const) expect(await sends(call)).toEqual({ method: 'POST', path, query: {}, body: undefined, idempotent: true });
+    expect(await sends((c) => c.webhookDeliveries.retry(7))).toEqual({ method: 'POST', path: '/webhook-deliveries/7/retry', query: {}, body: undefined, idempotent: true });
+  });
+
+  it('sends the dates of the usage call, and no dates by default', async () => {
+    expect((await sends((c) => c.usage({ from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z' }))).query).toEqual({ from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z' });
+    expect((await sends((c) => c.usage())).query).toEqual({});
+  });
+
+  it('sends every filter of the audit log', async () => {
+    const sent = await sends((c) => c.auditEvents({ limit: 50, starting_after: 9, type: 'api_key.created', actor: 'api_key', from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z', q: 'a@example.com' }));
+    expect(sent).toMatchObject({ method: 'GET', path: '/audit-events' });
+    expect(sent.query).toEqual({ limit: '50', starting_after: '9', type: 'api_key.created', actor: 'api_key', from: '2026-10-01T00:00:00Z', to: '2026-11-01T00:00:00Z', q: 'a@example.com' });
+    expect((await sends((c) => c.auditEvents())).query).toEqual({});
+  });
+});
+
+describe('the fields of the spec that a call gives back', () => {
+  it('keeps the new fields of usage, endpoints, deliveries and sessions', async () => {
+    const answers: Record<string, unknown> = {
+      '/usage': { from: 'a', to: 'b', livemode: true, customers: 3, enrolled_customers: 2, records: 1, sessions: 1, disclosures: 1, new_customers_7d: 2, pending_disclosures: 4 },
+      '/webhook-endpoints': { data: [{ id: 'we_1', url: 'https://a.example', events: ['*'], livemode: true, status: 'enabled', created_at: 'x', secret_last4: 'ab12', failing_deliveries: 2, last_delivery_at: 'y' }] },
+      '/webhook-deliveries': { data: [{ id: 1, endpoint: 'we_1', event: 'evt_1', type: 'session.completed', status: 'retrying', attempts: 2, max_attempts: 8, next_retry_at: 'z', created_at: 'x' }] },
+      '/sessions': { id: 'ses_1', status: 'created', secret_not_replayable: true },
+    };
+    const fetchStub: typeof fetch = async (input) => new Response(JSON.stringify(answers[new URL(String(input)).pathname.replace('/vault/v1', '')]), { status: 200 });
+    const c = new Custodian('k', { baseUrl: 'https://api.test/vault/v1', fetch: fetchStub });
+    expect(await c.usage()).toMatchObject({ new_customers_7d: 2, pending_disclosures: 4 });
+    expect((await c.webhookEndpoints.list())[0]).toMatchObject({ secret_last4: 'ab12', failing_deliveries: 2, last_delivery_at: 'y' });
+    expect((await c.webhookDeliveries.list())[0]).toMatchObject({ max_attempts: 8, next_retry_at: 'z' });
+    const session = await c.sessions.create({ customer: 'cus_1', purpose: 'entry', return_url: 'https://a.example/x', state: 's' });
+    expect(session.secret_not_replayable).toBe(true);
+    expect(session.url).toBeUndefined();
+  });
+});

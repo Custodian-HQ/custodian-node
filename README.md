@@ -26,6 +26,7 @@ make a customer, send them to the vault, hear what happened, and ask to see a va
 7. [Ask to see a value](#7-ask-to-see-a-value)
 8. [Open the values](#8-open-the-values)
 9. [Handle errors](#9-handle-errors)
+10. [Read your usage and audit log](#10-read-your-usage-and-audit-log)
 
 Words used in this guide:
 
@@ -52,6 +53,14 @@ import { Custodian } from '@custodian-hq/vault-node';
 const custodian = new Custodian(process.env.CUSTODIAN_API_KEY!);
 
 console.log(await custodian.me()); // { organization, name, livemode }
+```
+
+A call waits up to 30 seconds for the vault to answer. Change this with `timeoutMs`; `0` turns the limit off. When the limit is
+reached, the call throws an error with `error.name === 'TimeoutError'`. For a file download the limit applies to the wait for the
+answer to start, not to the time it takes to read the file.
+
+```ts
+const custodian = new Custodian(process.env.CUSTODIAN_API_KEY!, { timeoutMs: 10_000 });
 ```
 
 ## 2. Create a customer
@@ -89,6 +98,8 @@ const session = await custodian.sessions.create({
 - The `return_url` must be one you registered in the Console.
 - The `state` ties the visit to your signed-in user. Without it, an attacker could send your user to the attacker's own session.
 - The link in `session.url` works one time, for 15 minutes.
+- If you repeat a call with the same `idempotencyKey`, the answer has `secret_not_replayable: true` and no `url`. Make a new session
+  with a new key to get a new link.
 
 ## 4. Welcome the customer back
 
@@ -276,15 +287,35 @@ give the value names in `keys` and the file names in `files`. The envelope then 
 The vault keeps the encrypted file. You download it and the library opens it as a stream, so a large file never sits in memory.
 
 ```ts
-import { receiveFile } from '@custodian-hq/vault-node';
-import { Readable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { openEnvelopeFor, receiveFile } from '@custodian-hq/vault-node';
 
 const opened = await openEnvelopeFor(store, envelope, { ...expected, keys: ['full_name'], files: ['passport'] });
 
+// The library does not limit how many bytes a file gives. Stop the copy at a size you choose.
+const MAX_BYTES = 20 * 1024 * 1024;
+let written = 0;
+const limit = new Transform({
+  transform(chunk: Buffer, _encoding, done) {
+    written += chunk.length;
+    done(written > MAX_BYTES ? new Error('the file is larger than we allow') : null, chunk);
+  },
+});
+
 // Download before you acknowledge: the download works only while the envelope exists (at most 15 minutes).
+const tempPath = path.join(os.tmpdir(), `passport-${randomUUID()}`);
 const passport = await receiveFile(custodian, opened, 'passport');
-await pipeline(Readable.fromWeb(passport), fs.createWriteStream(tempPath));
+try {
+  await pipeline(Readable.fromWeb(passport), limit, fs.createWriteStream(tempPath));
+} catch (error) {
+  await fs.promises.rm(tempPath, { force: true });
+  throw error;
+}
 await custodian.disclosures.acknowledge(request.id);
 ```
 
@@ -292,6 +323,8 @@ await custodian.disclosures.acknowledge(request.id);
   the key and removes it from `opened.files` when the stream ends. If you use `downloadFile` and `openFile` yourself, clear `grant.key`
   with `grant.key.fill(0)`.
 - **Use the file only if the stream ends without an error.** A `FileError` means the file was changed or cut. Delete what you wrote.
+- **Limit the size you write.** A file can be compressed, and the library does not limit the total size after it is unpacked. A small
+  file from a customer can become very large. Count the bytes as in the example and stop when you reach your limit.
 - **Check the file type again.** The customer chose the file. Do not trust its name or its first bytes until you check them yourself.
 - `410 file_replaced`: the customer replaced or removed the file after approving. Ask again. `429 busy`: try again in a moment; the
   key is kept when the download is refused before it starts.
@@ -301,6 +334,7 @@ await custodian.disclosures.acknowledge(request.id);
 | `commitment` | The file was not made with this key. |
 | `open`, `truncated` | A chunk was changed, moved, added or removed, or the file is for another key name or record. |
 | `format`, `records`, `frame`, `too_long` | The file is damaged or was built to attack the reader. |
+| `key_cleared` | The key of the grant was already cleared (set to zeros), so it cannot open a file. |
 
 ## 9. Handle errors
 
@@ -321,6 +355,49 @@ try {
 ```
 
 Give the `requestId` to support if you need help.
+
+Some errors come from the library, not from the API. They are an `APIError` too:
+
+| `code` | What it means |
+|---|---|
+| `unparsed_response` | The vault answered with a success status, but the body is not JSON. Look for a proxy between you and the vault. |
+| `response_too_large` | An answer was larger than 32 MiB. |
+| `unexpected_status` | A download got a success status that is not the one for the request: `200` for a whole file, `206` for a range. |
+| `no_body` | A download answered with the right status but no body. |
+
+A call that waited too long throws an error with `error.name === 'TimeoutError'`. A call that you stopped with your own `signal`
+throws the error of that signal (`AbortError`, unless you gave another reason).
+
+## 10. Read your usage and audit log
+
+```ts
+const usage = await custodian.usage(); // this month so far
+console.log(usage.customers, usage.new_customers_7d, usage.pending_disclosures);
+
+const events = await custodian.auditEvents({ type: 'api_key.created', actor: 'api_key', limit: 50 });
+```
+
+`usage` also takes `from` and `to` (RFC 3339 times). `auditEvents` takes these filters. All are optional.
+
+| Filter | Meaning |
+|---|---|
+| `limit` | 1 to 100. The default is 20. |
+| `starting_after` | The id of the last event you received. |
+| `type` | One event type, such as `api_key.created`. |
+| `actor` | `member` or `api_key`. |
+| `from`, `to` | Events at or after `from`, and before `to`. RFC 3339 times. |
+| `q` | Matches a member's email, a key id, or text in the event. Up to 100 characters. |
+
+The list calls give you the array of items. They do not give the page fields the API also sends: the `total` of the audit log
+(how many events match in all) and `grace_hours` of `disclosureKeys.list`. Call the API yourself if you need them.
+
+Other fields you can read:
+
+| Answer | Fields |
+|---|---|
+| `webhookEndpoints.list` | `secret_last4`, `failing_deliveries`, and in lists `last_delivery_at` |
+| `webhookDeliveries.list` | `max_attempts`, and `next_retry_at` while a delivery is pending or retrying |
+| `sessions.create` | `secret_not_replayable` on a repeat of the call |
 
 ## More help
 

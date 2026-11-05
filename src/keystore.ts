@@ -1,4 +1,5 @@
 // Keeps each customer's vault-sign public key from the customer.enrolled webhook, and opens envelopes against it.
+import { decodeBase64Url } from './base64url.js';
 import { openEnvelope, type Expected, type Opened } from './envelope.js';
 
 export type KeyStoreErrorCode = 'no_key' | 'key_changed' | 'format';
@@ -14,6 +15,11 @@ export class KeyStoreError extends Error {
 export interface KeyStore {
   get(customerId: string): Buffer | undefined | Promise<Buffer | undefined>;
   put(customerId: string, key: Buffer): void | Promise<void>;
+  /**
+   * Keeps the key only if the customer has none, and says whether it did. It must be atomic, for example `INSERT ... ON CONFLICT DO NOTHING`.
+   * `observe` uses it when you provide it, so two events at once cannot replace each other's key.
+   */
+  putIfAbsent?(customerId: string, key: Buffer): boolean | Promise<boolean>;
   delete(customerId: string): void | Promise<void>;
 }
 
@@ -26,12 +32,15 @@ export class MemoryKeyStore implements KeyStore {
   put(customerId: string, key: Buffer): void {
     this.#keys.set(customerId, Buffer.from(key));
   }
+  putIfAbsent(customerId: string, key: Buffer): boolean {
+    if (this.#keys.has(customerId)) return false;
+    this.#keys.set(customerId, Buffer.from(key));
+    return true;
+  }
   delete(customerId: string): void {
     this.#keys.delete(customerId);
   }
 }
-
-const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Keeps the signing key that a verified webhook event names. Call it for every event, after constructEvent. It acts on:
@@ -42,14 +51,20 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 export async function observe(store: KeyStore, event: { type: string; data: { object: unknown } }): Promise<void> {
   const object = event.data.object as { id?: unknown; vault_sign_key?: unknown } | null;
   if (event.type === 'customer.enrolled') {
-    if (!object || typeof object.id !== 'string' || object.id === '' || typeof object.vault_sign_key !== 'string' || !BASE64URL.test(object.vault_sign_key)) {
-      throw new KeyStoreError('format', 'the customer.enrolled event does not hold an id and a key');
-    }
-    const key = Buffer.from(object.vault_sign_key, 'base64url');
+    const key = object && typeof object.id === 'string' && object.id !== '' && typeof object.vault_sign_key === 'string' && object.vault_sign_key !== '' ? decodeBase64Url(object.vault_sign_key) : undefined;
+    if (!object || typeof object.id !== 'string' || !key) throw new KeyStoreError('format', 'the customer.enrolled event does not hold an id and a key');
     if (key.length !== 32) throw new KeyStoreError('format', 'the signing key is not 32 bytes');
-    const held = await store.get(object.id);
-    if (held === undefined) return void (await store.put(object.id, key));
-    if (!held.equals(key)) throw new KeyStoreError('key_changed', 'the customer signing key changed without a reset');
+    // A second event can store a key between our read and our write. With `putIfAbsent` we read again and compare.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const held = await store.get(object.id);
+      if (held !== undefined) {
+        if (!held.equals(key)) throw new KeyStoreError('key_changed', 'the customer signing key changed without a reset');
+        return;
+      }
+      if (!store.putIfAbsent) return void (await store.put(object.id, key));
+      if (await store.putIfAbsent(object.id, key)) return;
+    }
+    throw new Error('custodian: the key store did not keep the signing key');
   } else if (event.type === 'customer.reset' || event.type === 'customer.deleted') {
     if (!object || typeof object.id !== 'string' || object.id === '') throw new KeyStoreError('format', `the ${event.type} event does not hold an id`);
     await store.delete(object.id);

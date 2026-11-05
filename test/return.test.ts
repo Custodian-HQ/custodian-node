@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseReturn } from '../src/return.js';
+import { approveUrl, parseReturn } from '../src/return.js';
 
 describe('parseReturn', () => {
   it('returns the session id for a good return, and ignores a status someone added', () => {
@@ -16,5 +16,30 @@ describe('parseReturn', () => {
       ['https://shop.example.com/done?session=ses_1&session=ses_2&state=abc', 'abc'],
       ['https://shop.example.com/done?session=ses_1&state=abc&state=abc', 'abc'],
     ] as const) expect(() => parseReturn(url, state), url).toThrow('not valid');
+  });
+});
+
+describe('approveUrl', () => {
+  const fp = 'a'.repeat(64);
+
+  it('takes https, and http for localhost only', () => {
+    expect(approveUrl('https://vault.example/b/o/approve#st=t', fp)).toBe(`https://vault.example/b/o/approve#st=t&fp=${fp}`);
+    expect(approveUrl('http://localhost:3000/b/o/approve#st=t', fp)).toBe(`http://localhost:3000/b/o/approve#st=t&fp=${fp}`);
+    expect(approveUrl('https://localhost/b/o/approve#st=t', fp)).toContain('&fp=');
+  });
+
+  it('refuses every other scheme, even for localhost', () => {
+    for (const url of [
+      'javascript://localhost/%0Aalert(1)#x',
+      'ftp://localhost/file#st=t',
+      'file://localhost/etc/passwd#st=t',
+      'data://localhost/#st=t',
+      'ws://localhost/#st=t',
+      'http://vault.example/b/o/approve#st=t',
+      'http://localhost.evil.example/b/o/approve#st=t',
+      'https://vault.example/b/o/approve',
+      'https://vault.example/b/o/approve#',
+      'not a url',
+    ]) expect(() => approveUrl(url, fp), url).toThrow(/not valid/);
   });
 });

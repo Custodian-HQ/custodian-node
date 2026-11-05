@@ -191,6 +191,27 @@ describe('openFile', () => {
     const long = Buffer.from(zs.must_fail.find((f) => f.name === 'a record longer than the limit')!.records_hex, 'hex');
     expect(await codeOf(() => open(seal(grant.key, fileAAD(context, grant.fileId), long, { ...opts, flags: 1 })))).toBe('records');
   });
+
+  it('refuses a compressed file that is cut at the border of a chunk', async () => {
+    // Several good records in a row, so the records layer is more than two chunks long.
+    const many = Buffer.concat(Array.from({ length: 6 }, () => Buffer.concat(zs.cases.map((c) => Buffer.from(c.records_hex, 'hex')))));
+    expect(many.length).toBeGreaterThan(2 * 1024);
+    const sealed = seal(grant.key, fileAAD(context, grant.fileId), many, { ...opts, size: 1024, flags: 1 });
+    const chunks = Math.ceil(many.length / 1024);
+    expect((await collect(openFile(grant, sealed, context))).length).toBeGreaterThan(0);
+    for (let keep = 1; keep < chunks; keep++) {
+      const cut = sealed.subarray(0, 70 + keep * (1024 + 16));
+      expect(await codeOf(() => collect(openFile(grant, cut, context))), `${keep} chunks kept`).toBe('truncated');
+    }
+  });
+
+  it('refuses a key that was cleared, with its own error', async () => {
+    const sealed = seal(grant.key, fileAAD(context, grant.fileId), crypto.randomBytes(2000), { ...opts, size: 1024, flags: 0 });
+    const cleared = { fileId: grant.fileId, key: Buffer.alloc(32) };
+    expect(await codeOf(() => collect(openFile(cleared, sealed, context)))).toBe('key_cleared');
+    expect(await codeOf(() => readStream(Buffer.alloc(32), aad, sealed))).toBe('key_cleared');
+    expect(await codeOf(() => readStream(Buffer.alloc(31), aad, sealed))).toBe('format');
+  });
 });
 
 describe('downloadFile and receiveFile', () => {
@@ -262,9 +283,66 @@ describe('downloadFile and receiveFile', () => {
     await c.disclosures.downloadFile('dsc_1', 'passport', { range: { start: 1024 } });
     expect(range).toBe('bytes=1024-');
     status = 200;
-    await expect(c.disclosures.downloadFile('dsc_1', 'passport', { range: { start: 5 } })).rejects.toMatchObject({ code: 'unexpected_response' });
+    await expect(c.disclosures.downloadFile('dsc_1', 'passport', { range: { start: 5 } })).rejects.toMatchObject({ status: 200, code: 'unexpected_status' });
     await expect(c.disclosures.downloadFile('dsc_1', 'passport', { range: { start: -1 } })).rejects.toThrow(/byte range/);
     status = 410;
     await expect(c.disclosures.downloadFile('dsc_1', 'passport')).rejects.toMatchObject({ status: 410, code: 'file_replaced', message: expect.stringMatching(/replaced or removed/) });
+  });
+
+  it('wants exactly 200 for a whole file and exactly 206 for a range, and refuses any other success', async () => {
+    let status = 200;
+    const fetchStub: typeof fetch = async () => new Response(status === 204 ? null : new Uint8Array([1]), { status });
+    const c = new Custodian('k', { fetch: fetchStub });
+    status = 206;
+    await expect(c.disclosures.downloadFile('dsc_1', 'passport')).rejects.toMatchObject({ status: 206, code: 'unexpected_status' });
+    status = 204;
+    await expect(c.disclosures.downloadFile('dsc_1', 'passport')).rejects.toMatchObject({ status: 204, code: 'unexpected_status' });
+    await expect(c.disclosures.downloadFile('dsc_1', 'passport', { range: { start: 0 } })).rejects.toMatchObject({ status: 204, code: 'unexpected_status' });
+    status = 200;
+    expect([...(await collect(await c.disclosures.downloadFile('dsc_1', 'passport')))]).toEqual([1]);
+  });
+
+  it('says no file named for a name that only the prototype has', async () => {
+    let called = false;
+    const c = new Custodian('k', { fetch: async () => { called = true; return new Response(sealed, { status: 200 }); } });
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      await expect(receiveFile(c, opened(), name)).rejects.toThrow(/no file named/);
+    }
+    expect(called).toBe(false);
+  });
+
+  it('settles a cancel that comes while a read waits on a stalled download, and clears the key', async () => {
+    let signal: AbortSignal | undefined;
+    let bodyCancelled = false;
+    // The first bytes arrive and then nothing does: the read inside the file layer waits for more.
+    const body = new ReadableStream<Uint8Array>({
+      start: (controller) => controller.enqueue(sealed.subarray(0, 10)),
+      pull: () => new Promise<void>(() => undefined),
+      cancel: () => void (bodyCancelled = true),
+    });
+    const c = new Custodian('k', { fetch: async (_input, init) => { signal = init?.signal ?? undefined; return new Response(body, { status: 200 }); } });
+    const o = opened();
+    const key = o.files['passport']!.key;
+    const stream = await receiveFile(c, o, 'passport');
+    const reader = stream.getReader();
+    const read = reader.read().catch((e: unknown) => e);
+    await new Promise((done) => setTimeout(done, 50));
+    const outcome = await Promise.race([reader.cancel().then(() => 'settled'), new Promise((done) => setTimeout(() => done('hung'), 1000))]);
+    expect(outcome).toBe('settled');
+    expect(signal?.aborted).toBe(true);
+    expect(bodyCancelled).toBe(true);
+    expect(key.equals(Buffer.alloc(32))).toBe(true);
+    expect(o.files).toEqual({});
+    expect(await Promise.race([read, new Promise((done) => setTimeout(() => done('pending'), 1000))])).not.toBe('pending');
+  });
+
+  it('also aborts the download when the caller aborts', async () => {
+    let signal: AbortSignal | undefined;
+    const c = new Custodian('k', { fetch: async (_input, init) => { signal = init?.signal ?? undefined; return new Response(sealed, { status: 200 }); } });
+    const caller = new AbortController();
+    await receiveFile(c, opened(), 'passport', { signal: caller.signal });
+    expect(signal?.aborted).toBe(false);
+    caller.abort();
+    expect(signal?.aborted).toBe(true);
   });
 });

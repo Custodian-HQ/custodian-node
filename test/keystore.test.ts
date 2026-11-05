@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { EnvelopeError, hybridSupported, KeyStoreError, MemoryKeyStore, observe, openEnvelopeFor, SUITE_HYBRID, type Expected } from '../src/index.js';
+import { EnvelopeError, hybridSupported, KeyStoreError, MemoryKeyStore, observe, openEnvelopeFor, SUITE_HYBRID, type Expected, type KeyStore } from '../src/index.js';
+import { nonCanonical } from './envelope-builder.js';
 
 interface Case {
   suite: string;
@@ -29,15 +30,19 @@ const codeOf = async (run: () => Promise<unknown>): Promise<string> => {
 };
 
 describe('the key store', () => {
-  it.each(cases)('opens the envelope for $suite with the key the webhook gave, and refuses without it', async (c) => {
-    if (c.suite === SUITE_HYBRID && !hybridSupported) return;
+  const opensWithTheWebhookKey = async (c: Case): Promise<void> => {
     const store = new MemoryKeyStore();
     expect(await codeOf(() => openEnvelopeFor(store, c.envelope, want(c)))).toBe('no_key');
     await observe(store, enrolled(c.customer_id, Buffer.from(c.vault_sign_public_key_hex, 'hex')));
     const opened = await openEnvelopeFor(store, c.envelope, want(c));
     expect(Object.keys(opened.fields).sort()).toEqual([...(c.keys ?? [])].sort());
     expect(Object.keys(opened.files).sort()).toEqual([...(c.files ?? [])].sort());
-  });
+  };
+  const name = 'opens the envelope for $suite with the key the webhook gave, and refuses without it';
+  const supported = cases.filter((c) => c.suite !== SUITE_HYBRID || hybridSupported);
+  const unsupported = cases.filter((c) => !supported.includes(c));
+  it.each(supported)(name, opensWithTheWebhookKey);
+  if (unsupported.length > 0) it.skip.each(unsupported)(name, opensWithTheWebhookKey);
 
   it('refuses another key for a known customer until a reset or a deletion', async () => {
     const a = Buffer.alloc(32);
@@ -66,7 +71,8 @@ describe('the key store', () => {
 
   it('refuses a bad event and ignores other types', async () => {
     const store = new MemoryKeyStore();
-    for (const object of [{ vault_sign_key: 'AAAA' }, { id: 'cus_1', vault_sign_key: Buffer.alloc(31).toString('base64url') }, { id: 'cus_1', vault_sign_key: '!!' }, null]) {
+    const canonical = Buffer.alloc(32).toString('base64url');
+    for (const object of [{ vault_sign_key: 'AAAA' }, { id: 'cus_1', vault_sign_key: Buffer.alloc(31).toString('base64url') }, { id: 'cus_1', vault_sign_key: '!!' }, { id: 'cus_1', vault_sign_key: nonCanonical(canonical) }, { id: 'cus_1', vault_sign_key: '' }, null]) {
       expect(await codeOf(() => observe(store, { type: 'customer.enrolled', data: { object } }))).toBe('format');
     }
     await observe(store, { type: 'record.created', data: { object: {} } });
@@ -78,5 +84,69 @@ describe('the key store', () => {
     const store = new MemoryKeyStore();
     await observe(store, enrolled(c.customer_id, Buffer.alloc(32)));
     expect(await codeOf(() => openEnvelopeFor(store, c.envelope, want(c)))).toBe('signature');
+  });
+});
+
+describe('two events at once for one customer', () => {
+  const a = Buffer.alloc(32, 1);
+  const b = Buffer.alloc(32, 2);
+  const pause = (): Promise<void> => new Promise((done) => setTimeout(done, 5));
+
+  /** A store that waits on every call, as a database does. `putIfAbsent` is atomic, as it must be. */
+  class SlowStore implements KeyStore {
+    readonly inner = new MemoryKeyStore();
+    async get(id: string): Promise<Buffer | undefined> {
+      await pause();
+      return this.inner.get(id);
+    }
+    async put(id: string, key: Buffer): Promise<void> {
+      await pause();
+      this.inner.put(id, key);
+    }
+    async putIfAbsent(id: string, key: Buffer): Promise<boolean> {
+      await pause();
+      return this.inner.putIfAbsent(id, key);
+    }
+    async delete(id: string): Promise<void> {
+      await pause();
+      this.inner.delete(id);
+    }
+  }
+
+  const oneWins = (results: PromiseSettledResult<void>[]): void => {
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const lost = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(lost.reason).toBeInstanceOf(KeyStoreError);
+    expect((lost.reason as KeyStoreError).code).toBe('key_changed');
+  };
+
+  it('lets one key win and refuses the other, in memory', async () => {
+    const store = new MemoryKeyStore();
+    oneWins(await Promise.allSettled([observe(store, enrolled('cus_1', a)), observe(store, enrolled('cus_1', b))]));
+    expect([a, b].filter((k) => store.get('cus_1')?.equals(k))).toHaveLength(1);
+  });
+
+  it('lets one key win and refuses the other, with a store that waits', async () => {
+    const store = new SlowStore();
+    oneWins(await Promise.allSettled([observe(store, enrolled('cus_1', a)), observe(store, enrolled('cus_1', b))]));
+    expect([a, b].filter((k) => store.inner.get('cus_1')?.equals(k))).toHaveLength(1);
+  });
+
+  it('accepts the same key twice at once', async () => {
+    const store = new SlowStore();
+    const results = await Promise.allSettled([observe(store, enrolled('cus_1', a)), observe(store, enrolled('cus_1', a))]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+  });
+
+  it('stays correct with a store that has no putIfAbsent, when the events come one after the other', async () => {
+    const store: KeyStore = { get: (id) => inner.get(id), put: (id, key) => inner.put(id, key), delete: (id) => inner.delete(id) };
+    const inner = new MemoryKeyStore();
+    await observe(store, enrolled('cus_1', a));
+    expect(await codeOf(() => observe(store, enrolled('cus_1', b)))).toBe('key_changed');
+  });
+
+  it('gives up with an error when a store keeps saying no and holds nothing', async () => {
+    const store: KeyStore = { get: () => undefined, put: () => undefined, putIfAbsent: () => false, delete: () => undefined };
+    await expect(observe(store, enrolled('cus_1', a))).rejects.toThrow(/did not keep/);
   });
 });

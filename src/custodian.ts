@@ -1,13 +1,13 @@
 // The Custodian Data Vault client, with a method for every operation of the business API.
 import { APIError, Client, type ClientOptions, type RequestOptions } from './client.js';
-import type { CustomerState, DisclosureKeyStatus, DisclosureStatus, Purpose, SessionStatus, WebhookDeliveryStatus, WebhookEndpointStatus } from './enums.js';
+import type { CustomerState, DisclosureKeyStatus, DisclosureStatus, Open, Purpose, SessionStatus, WebhookDeliveryStatus, WebhookEndpointStatus } from './enums.js';
 
 export interface Customer {
   id: string;
   external_ref: string;
   livemode: boolean;
   /** `CustomerState.Active`, or `CustomerState.ResetEnrolmentNeeded` after a reset. A newer API can send a state this library does not know: use `isCustomerState` to check. */
-  state: string;
+  state: Open<CustomerState>;
   enrolled: boolean;
   /** The customer's public signing key, base64url. Keep the one from the customer.enrolled webhook and check envelopes against that; do not rely on this field alone. */
   vault_sign_key?: string;
@@ -70,9 +70,9 @@ export interface Session {
   id: string;
   customer: string;
   /** What the session is for. A newer API can send a purpose this library does not know: use `isPurpose` to check. */
-  purpose: string;
+  purpose: Open<Purpose>;
   /** Where the session is. A newer API can send a status this library does not know: use `isSessionStatus` to check. */
-  status: SessionStatus;
+  status: Open<SessionStatus>;
   livemode: boolean;
   return_url: string;
   state: string;
@@ -84,6 +84,8 @@ export interface Session {
   record?: string;
   /** Only in the answer that creates the session. Send the customer here. */
   url?: string;
+  /** True on a repeat of the call that made the session or reset, with the same idempotency key. The one-time `url` is not in a repeat: make a new session or reset with a new key. */
+  secret_not_replayable?: boolean;
   warnings?: string[];
 }
 /** A key of a record: its name, label, type and version. You never see a value. */
@@ -117,16 +119,28 @@ export interface WebhookEndpoint {
   url: string;
   events: string[];
   livemode: boolean;
-  status: WebhookEndpointStatus;
+  /** A newer API can send a status this library does not know: use `isWebhookEndpointStatus` to check. */
+  status: Open<WebhookEndpointStatus>;
   created_at: string;
+  /** The last 4 characters of the signing secret, to tell secrets apart. */
+  secret_last4: string;
+  /** Events still retrying, plus events that gave up in the last 24 hours. */
+  failing_deliveries: number;
+  /** When the newest event for this endpoint was delivered, gave up, or was queued. Only in lists. */
+  last_delivery_at?: string;
 }
 export interface WebhookDelivery {
   id: number;
   endpoint: string;
   event: string;
   type: string;
-  status: WebhookDeliveryStatus;
+  /** A newer API can send a status this library does not know: use `isWebhookDeliveryStatus` to check. */
+  status: Open<WebhookDeliveryStatus>;
   attempts: number;
+  /** How many tries the delivery gets before it gives up. */
+  max_attempts: number;
+  /** When the next try is due. Only while the delivery is pending or retrying. */
+  next_retry_at?: string;
   last_status?: number;
   last_error?: string;
   created_at: string;
@@ -141,6 +155,23 @@ export interface Usage {
   records: number;
   sessions: number;
   disclosures: number;
+  /** Customers created in the 7 days before the end of the period. */
+  new_customers_7d: number;
+  /** Disclosure requests that are still waiting for a customer now. */
+  pending_disclosures: number;
+}
+export interface AuditEventParams {
+  limit?: number;
+  starting_after?: number;
+  /** One event type, such as `api_key.created`. */
+  type?: string;
+  actor?: 'member' | 'api_key';
+  /** Events at or after this time. */
+  from?: string;
+  /** Events before this time. */
+  to?: string;
+  /** Matches a member's email, a key id, or text in the event. */
+  q?: string;
 }
 export interface AuditEvent {
   id: number;
@@ -159,9 +190,9 @@ export interface AuditEvent {
 
 const enc = encodeURIComponent;
 
-function query(params: Record<string, string | number | undefined>): string {
+function query(params: object): string {
   const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') search.set(key, String(value));
+  for (const [key, value] of Object.entries(params) as [string, string | number | undefined][]) if (value !== undefined && value !== '') search.set(key, String(value));
   const text = search.toString();
   return text ? `?${text}` : '';
 }
@@ -174,7 +205,8 @@ export interface RegisteredDisclosureKey {
   public_key: string;
   fingerprint: string;
   fingerprint_short: string;
-  status: DisclosureKeyStatus;
+  /** A newer API can send a status this library does not know: use `isDisclosureKeyStatus` to check. */
+  status: Open<DisclosureKeyStatus>;
   livemode: boolean;
   registered_at: string;
   retires_at: string | null;
@@ -200,7 +232,8 @@ export interface Disclosure {
   customer: string;
   keys: string[];
   reason: string;
-  status: DisclosureStatus;
+  /** A newer API can send a status this library does not know: use `isDisclosureStatus` to check. */
+  status: Open<DisclosureStatus>;
   livemode: boolean;
   disclosure_key: string;
   expires_at: string;
@@ -322,10 +355,11 @@ export class Custodian {
         }
         throw error;
       }
-      if (!response.body || (r && response.status !== 206)) {
+      if (response.status !== (r ? 206 : 200)) {
         await response.body?.cancel();
-        throw new APIError(response.status, 'api_error', 'unexpected_response', r ? 'the server did not answer with the byte range' : 'the download has no body');
+        throw new APIError(response.status, 'api_error', 'unexpected_status', r ? 'the server did not answer with the byte range' : 'the server did not answer with the whole file');
       }
+      if (!response.body) throw new APIError(response.status, 'api_error', 'no_body', 'the download has no body');
       return response.body;
     },
   };
@@ -360,6 +394,7 @@ export class Custodian {
     return this.#client.request('GET', '/usage' + query(params));
   }
 
-  auditEvents = async (params: { limit?: number; starting_after?: number } = {}): Promise<AuditEvent[]> =>
+  /** The audit log, newest first. Every filter is optional. `from` and `to` are RFC 3339 times; `q` is up to 100 characters. */
+  auditEvents = async (params: AuditEventParams = {}): Promise<AuditEvent[]> =>
     (await this.#client.request<{ data: AuditEvent[] }>('GET', '/audit-events' + query(params))).data;
 }

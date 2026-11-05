@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import type { Custodian } from './custodian.js';
 import type { FileGrant, Opened } from './envelope.js';
 
-export type FileErrorCode = 'format' | 'commitment' | 'open' | 'truncated' | 'too_long' | 'records' | 'frame';
+export type FileErrorCode = 'format' | 'commitment' | 'open' | 'truncated' | 'too_long' | 'records' | 'frame' | 'key_cleared';
 
 /** The reason a file was refused. Read `code`. Any refusal means you must not use the bytes you already read. */
 export class FileError extends Error {
@@ -29,6 +29,7 @@ const HEADER_SIZE = 70;
 const TAG_SIZE = 16;
 const MIN_CHUNK = 1024;
 const MAX_CHUNK = 1 << 20;
+// A stream has at most 2^32 - 1 chunks, so the counters run from 0 to 2^32 - 2.
 const MAX_CHUNKS = 2 ** 32 - 1;
 const FLAG_ZSTD = 0x01;
 const BLOCK_SIZE = 1 << 20;
@@ -109,6 +110,7 @@ const hkdf = (key: Buffer, label: string, salt: Buffer): Buffer => Buffer.from(c
  */
 export async function* openStream(fileKey: Buffer, aad: Buffer, ciphertext: AsyncIterable<Uint8Array> | Uint8Array): AsyncGenerator<number | Buffer> {
   if (fileKey.length !== 32) throw new FileError('format', 'a file key is 32 bytes');
+  if (fileKey.every((byte) => byte === 0)) throw new FileError('key_cleared', 'the file key was cleared');
   const input = new Input(ciphertext);
   try {
     await input.fill(HEADER_SIZE);
@@ -129,7 +131,7 @@ export async function* openStream(fileKey: Buffer, aad: Buffer, ciphertext: Asyn
 
     const full = size + TAG_SIZE;
     for (let counter = 0; ; counter++) {
-      if (counter > MAX_CHUNKS) throw new FileError('too_long', 'the file has too many chunks');
+      if (counter >= MAX_CHUNKS) throw new FileError('too_long', 'the file has too many chunks');
       // A full chunk is the last one only if nothing follows it.
       await input.fill(full + 1);
       const last = input.length <= full;
@@ -247,34 +249,56 @@ export function openFile(grant: FileGrant, ciphertext: AsyncIterable<Uint8Array>
  * cancelled. If the download is refused before it starts (such as `429 busy`), the key is kept, so you can try again.
  */
 export async function receiveFile(custodian: Custodian, opened: Opened, name: string, options: { signal?: AbortSignal } = {}): Promise<ReadableStream<Uint8Array>> {
-  const grant = opened.files[name];
-  if (!grant) throw new Error(`custodian: the envelope holds no file named ${name}, or it was already received`);
-  const ciphertext = await custodian.disclosures.downloadFile(opened.requestId, name, options);
+  if (!Object.hasOwn(opened.files, name)) throw new Error(`custodian: the envelope holds no file named ${name}, or it was already received`);
+  const grant = opened.files[name]!;
+  // Aborted by `cancel`, so a download that has stalled is dropped at once.
+  const abort = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, abort.signal]) : abort.signal;
+  const ciphertext = await custodian.disclosures.downloadFile(opened.requestId, name, { signal });
   const context = { businessId: opened.businessId, customerId: opened.customerId, record: opened.record, key: name };
-  const parts = fileBytes(grant, ciphertext, context);
+  const reader = ciphertext.getReader();
+  const body: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) return;
+          yield next.value;
+        }
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+    },
+  };
+  const parts = fileBytes(grant, body, context);
+  let cancelled = false;
   const discard = (): void => {
     grant.key.fill(0);
     delete opened.files[name];
   };
-  // Built by hand so a cancel before the first read still clears the key and frees the download.
+  // Built by hand so a cancel, even one while a read waits on the network, clears the key and frees the download.
   return new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
         try {
           const next = await parts.next();
+          if (cancelled) return;
           if (next.done) {
             discard();
             controller.close();
           } else controller.enqueue(next.value);
         } catch (error) {
           discard();
-          controller.error(error);
+          if (!cancelled) controller.error(error);
         }
       },
-      async cancel(reason) {
+      async cancel() {
+        cancelled = true;
         discard();
-        await parts.return(undefined);
-        await ciphertext.cancel(reason).catch(() => undefined);
+        abort.abort();
+        // Cancelling the reader ends a read that waits on the network, so `return` does not queue behind it.
+        await reader.cancel().catch(() => undefined);
+        await parts.return(undefined).catch(() => undefined);
       },
     },
     { highWaterMark: 0 },

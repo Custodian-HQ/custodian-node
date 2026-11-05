@@ -32,6 +32,7 @@ export function parseReturn(returnUrl: string, expectedState: string): string {
  * Adds your disclosure key's fingerprint to the link of an approve session, in the fragment, so it never reaches the vault's server. Take the
  * fingerprint from your own app configuration (`fingerprint()` of your key), not from the vault: the hosted page compares it with the key the
  * vault gives it, and stops the request if they differ. That check is what tells the customer the request is yours.
+ * The address must use https. Plain http is allowed only for localhost, for local tests.
  */
 export function approveUrl(sessionUrl: string, fingerprint: string): string {
   if (!/^[0-9a-fA-F]{64}$/.test(fingerprint)) throw new Error('custodian: the fingerprint must be 64 hexadecimal characters');
@@ -41,6 +42,7 @@ export function approveUrl(sessionUrl: string, fingerprint: string): string {
   } catch {
     throw new Error('custodian: the session address is not valid');
   }
-  if (url.hash.length < 2 || (url.protocol !== 'https:' && url.hostname !== 'localhost')) throw new Error('custodian: the session address is not valid');
+  const allowed = url.protocol === 'https:' || (url.protocol === 'http:' && url.hostname === 'localhost');
+  if (url.hash.length < 2 || !allowed) throw new Error('custodian: the session address is not valid');
   return `${sessionUrl}&fp=${fingerprint.toLowerCase()}`;
 }

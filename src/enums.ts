@@ -2,6 +2,9 @@
 // Each list is a plain object, and the type of the same name is the union of its values.
 // A newer API can send a value that this library does not know yet: the `is...` functions check that.
 
+/** The values this library knows, and any other text a newer API may send. */
+export type Open<T extends string> = T | (string & Record<never, never>);
+
 /** True when the text is one of the values of the list. */
 function isValueOf<T extends Record<string, string>>(list: T, text: string): text is T[keyof T] {
   return (Object.values(list) as string[]).includes(text);

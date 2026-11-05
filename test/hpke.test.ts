@@ -2,10 +2,12 @@ import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SUITE_CLASSIC, SUITE_HYBRID, defaultSuite, fingerprint, generateKey, open, type Sealed, type Suite } from '../src/disclosure.js';
 import { hybridSupported, setupReceiver, xwing, type AeadId } from '../src/hpke.js';
+import { build } from './envelope-builder.js';
 
 const hex = (s: string): Buffer => Buffer.from(s, 'hex');
 const fixture = <T>(name: string): T => JSON.parse(fs.readFileSync(`test/fixtures/v1/${name}`, 'utf8')) as T;
 const hybrid = hybridSupported ? it : it.skip;
+const AUTHENTICATION = /authenticate/;
 
 describe('X-Wing against the published vector', () => {
   interface Vector {
@@ -42,9 +44,46 @@ describe('disclosures sealed by custodian-device-crypto', () => {
     const changed = sealed();
     changed.ciphertext = Buffer.from(changed.ciphertext);
     changed.ciphertext[0]! ^= 1;
-    expect(() => open(sample.suite, hex(sample.SkR), changed)).toThrow();
+    expect(() => open(sample.suite, hex(sample.SkR), changed)).toThrow(AUTHENTICATION);
 
-    expect(() => open(sample.suite, hex(sample.SkR), { ...sealed(), aad: Buffer.from('other') })).toThrow();
+    expect(() => open(sample.suite, hex(sample.SkR), { ...sealed(), aad: Buffer.from('other') })).toThrow(AUTHENTICATION);
+
+    expect(() => open(sample.suite, xwing.generateSeed(), sealed())).toThrow('key commitment does not match');
+    const changedEnc = sealed();
+    changedEnc.enc = Buffer.from(changedEnc.enc);
+    changedEnc.enc[0]! ^= 1;
+    expect(() => open(sample.suite, hex(sample.SkR), changedEnc)).toThrow('key commitment does not match');
+  });
+});
+
+// The classic suite works on every supported Node, so these always run.
+describe('opening with the classic suite', () => {
+  const { sealed, want } = build();
+  const copy = (): Sealed => ({ enc: Buffer.from(sealed.enc), info: Buffer.from(sealed.info), aad: Buffer.from(sealed.aad), ciphertext: Buffer.from(sealed.ciphertext), commit: Buffer.from(sealed.commit) });
+
+  it('opens a message that is not changed', () => {
+    expect(open(SUITE_CLASSIC, want.privateKey, copy()).length).toBeGreaterThan(0);
+  });
+
+  it('refuses a changed ciphertext, a cut ciphertext and another aad, with an authentication error', () => {
+    const changed = copy();
+    changed.ciphertext[0]! ^= 1;
+    expect(() => open(SUITE_CLASSIC, want.privateKey, changed)).toThrow(AUTHENTICATION);
+    const cut = copy();
+    cut.ciphertext = cut.ciphertext.subarray(0, -1);
+    expect(() => open(SUITE_CLASSIC, want.privateKey, cut)).toThrow(AUTHENTICATION);
+    expect(() => open(SUITE_CLASSIC, want.privateKey, { ...copy(), aad: Buffer.from('other') })).toThrow(AUTHENTICATION);
+  });
+
+  it('refuses a changed enc, another private key and a changed commitment, with a commitment error', () => {
+    const enc = copy();
+    enc.enc[0]! ^= 1;
+    expect(() => open(SUITE_CLASSIC, want.privateKey, enc)).toThrow('key commitment does not match');
+    expect(() => open(SUITE_CLASSIC, generateKey(SUITE_CLASSIC).privateKey, copy())).toThrow('key commitment does not match');
+    const commit = copy();
+    commit.commit[0]! ^= 1;
+    expect(() => open(SUITE_CLASSIC, want.privateKey, commit)).toThrow('key commitment does not match');
+    expect(() => open(SUITE_CLASSIC, want.privateKey, { ...copy(), commit: Buffer.alloc(31) })).toThrow('key commitment does not match');
   });
 });
 

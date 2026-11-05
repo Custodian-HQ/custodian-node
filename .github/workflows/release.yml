@@ -16,7 +16,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Trusted publishing needs npm 11.5.1 or later
         run: npm install -g npm@^11.5.1
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run check
       - name: The tag must match the package and API spec versions
         run: node scripts/check-version.mjs "$GITHUB_REF_NAME"
