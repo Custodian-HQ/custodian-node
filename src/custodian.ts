@@ -1,5 +1,5 @@
 // The Custodian Data Vault client, with a method for every operation of the business API.
-import { APIError, Client, type ClientOptions, type RequestOptions } from './client.js';
+import { API_ERROR_TYPE, APIError, Client, type ClientOptions, type RequestOptions } from './client.js';
 import type { CustomerState, DisclosureKeyStatus, DisclosureStatus, Open, Purpose, SessionStatus, WebhookDeliveryStatus, WebhookEndpointStatus } from './enums.js';
 
 export interface Customer {
@@ -188,7 +188,14 @@ export interface AuditEvent {
   payload?: Record<string, unknown>;
 }
 
-const enc = encodeURIComponent;
+function enc(segment: string): string {
+  if (segment === '' || segment === '.' || segment === '..') throw new Error('custodian: an id or name must not be empty, "." or ".."');
+  return encodeURIComponent(segment);
+}
+
+async function listData<T>(client: Client, path: string): Promise<T[]> {
+  return (await client.request<{ data: T[] }>('GET', path)).data;
+}
 
 function query(params: object): string {
   const search = new URLSearchParams();
@@ -310,7 +317,7 @@ export class Custodian {
   };
 
   readonly templates = {
-    list: async (): Promise<Template[]> => (await this.#client.request<{ data: Template[] }>('GET', '/templates')).data,
+    list: (): Promise<Template[]> => listData(this.#client, '/templates'),
     create: (template: Template): Promise<Template> => this.#client.request('POST', '/templates', template),
     get: (name: string): Promise<Template> => this.#client.request('GET', `/templates/${enc(name)}`),
     replace: (name: string, keys: Key[]): Promise<Template> => this.#client.request('PUT', `/templates/${enc(name)}`, { keys }),
@@ -321,7 +328,7 @@ export class Custodian {
 
   /** Keys are registered and retired in the Console, where a member confirms with a code. This API cannot change them. */
   readonly disclosureKeys = {
-    list: async (): Promise<RegisteredDisclosureKey[]> => (await this.#client.request<{ data: RegisteredDisclosureKey[] }>('GET', '/disclosure-keys')).data,
+    list: (): Promise<RegisteredDisclosureKey[]> => listData(this.#client, '/disclosure-keys'),
   };
 
   readonly disclosures = {
@@ -357,16 +364,11 @@ export class Custodian {
       }
       if (response.status !== (r ? 206 : 200)) {
         await response.body?.cancel();
-        throw new APIError(response.status, 'api_error', 'unexpected_status', r ? 'the server did not answer with the byte range' : 'the server did not answer with the whole file');
+        throw new APIError(response.status, API_ERROR_TYPE, 'unexpected_status', r ? 'the server did not answer with the byte range' : 'the server did not answer with the whole file');
       }
-      if (!response.body) throw new APIError(response.status, 'api_error', 'no_body', 'the download has no body');
+      if (!response.body) throw new APIError(response.status, API_ERROR_TYPE, 'no_body', 'the download has no body');
       return response.body;
     },
-  };
-
-  readonly recoveryPolicy = {
-    get: (): Promise<{ recovery_threshold: number }> => this.#client.request('GET', '/recovery-policy'),
-    set: (threshold: number): Promise<{ recovery_threshold: number }> => this.#client.request('PUT', '/recovery-policy', { recovery_threshold: threshold }),
   };
 
   /** The text a customer reads after they ask you for a reset. The default is "Contact the business that gave you this link". */
@@ -378,12 +380,12 @@ export class Custodian {
 
   /** A member makes, changes, deletes and rotates endpoints in the Console only. With an API key you can only list them. */
   readonly webhookEndpoints = {
-    list: async (): Promise<WebhookEndpoint[]> => (await this.#client.request<{ data: WebhookEndpoint[] }>('GET', '/webhook-endpoints')).data,
+    list: (): Promise<WebhookEndpoint[]> => listData(this.#client, '/webhook-endpoints'),
   };
 
   readonly webhookDeliveries = {
     list: async (params: { endpoint?: string; limit?: number; starting_after?: number } = {}): Promise<WebhookDelivery[]> =>
-      (await this.#client.request<{ data: WebhookDelivery[] }>('GET', '/webhook-deliveries' + query(params))).data,
+      listData<WebhookDelivery>(this.#client, '/webhook-deliveries' + query(params)),
     retry: async (id: number): Promise<void> => {
       await this.#client.request('POST', `/webhook-deliveries/${id}/retry`);
     },
@@ -396,5 +398,5 @@ export class Custodian {
 
   /** The audit log, newest first. Every filter is optional. `from` and `to` are RFC 3339 times; `q` is up to 100 characters. */
   auditEvents = async (params: AuditEventParams = {}): Promise<AuditEvent[]> =>
-    (await this.#client.request<{ data: AuditEvent[] }>('GET', '/audit-events' + query(params))).data;
+    listData<AuditEvent>(this.#client, '/audit-events' + query(params));
 }

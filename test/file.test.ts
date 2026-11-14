@@ -192,6 +192,17 @@ describe('openFile', () => {
     expect(await codeOf(() => open(seal(grant.key, fileAAD(context, grant.fileId), long, { ...opts, flags: 1 })))).toBe('records');
   });
 
+  it('refuses a stream with more chunks than the limit', async () => {
+    const sealed = seal(grant.key, fileAAD(context, grant.fileId), crypto.randomBytes(3 * 1024), { ...opts, size: 1024, flags: 0 });
+    const run = async (max: number): Promise<number> => {
+      let n = 0;
+      for await (const part of openStream(grant.key, fileAAD(context, grant.fileId), sealed, max)) if (typeof part !== 'number') n++;
+      return n;
+    };
+    expect(await run(3)).toBe(3);
+    await expect(run(2)).rejects.toMatchObject({ code: 'too_long' });
+  });
+
   it('refuses a compressed file that is cut at the border of a chunk', async () => {
     // Several good records in a row, so the records layer is more than two chunks long.
     const many = Buffer.concat(Array.from({ length: 6 }, () => Buffer.concat(zs.cases.map((c) => Buffer.from(c.records_hex, 'hex')))));

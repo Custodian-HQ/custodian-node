@@ -65,8 +65,6 @@ describe('the SDK and the API spec', () => {
     await c.disclosures.get('dsc_1');
     await c.disclosures.list({ status: 'pending', limit: 5, starting_after: 'dsc_1' });
     await c.disclosures.cancel('dsc_1');
-    await c.recoveryPolicy.get();
-    await c.recoveryPolicy.set(3);
     await c.webhookEndpoints.list();
     await c.webhookDeliveries.list({ endpoint: 'we_1', limit: 5, starting_after: 9 });
     await c.webhookDeliveries.retry(7);
@@ -179,11 +177,10 @@ describe('what each call sends', () => {
     });
   });
 
-  it('sends the contact text, the templates and the recovery threshold in the shape of the spec', async () => {
+  it('sends the contact text, and the templates in the shape of the spec', async () => {
     expect(await sends((c) => c.resetContactText.set('Call us'))).toMatchObject({ method: 'PUT', path: '/reset-contact-text', body: { text: 'Call us' }, idempotent: false });
     expect(await sends((c) => c.templates.create({ name: 'kyc', keys: [{ name: 'a', type: 'text' }] }))).toMatchObject({ method: 'POST', path: '/templates', body: { name: 'kyc', keys: [{ name: 'a', type: 'text' }] }, idempotent: true });
     expect(await sends((c) => c.templates.replace('my kyc', [{ name: 'b' }]))).toMatchObject({ method: 'PUT', path: '/templates/my%20kyc', body: { keys: [{ name: 'b' }] } });
-    expect(await sends((c) => c.recoveryPolicy.set(3))).toMatchObject({ method: 'PUT', path: '/recovery-policy', body: { recovery_threshold: 3 } });
   });
 
   it('sends the disclosure calls that have no body', async () => {
@@ -223,5 +220,12 @@ describe('the fields of the spec that a call gives back', () => {
     const session = await c.sessions.create({ customer: 'cus_1', purpose: 'entry', return_url: 'https://a.example/x', state: 's' });
     expect(session.secret_not_replayable).toBe(true);
     expect(session.url).toBeUndefined();
+  });
+});
+
+describe('ids in paths', () => {
+  it('refuses an empty id, "." and ".."', async () => {
+    const custodian = new Custodian('k', { fetch: () => { throw new Error('a request was sent'); } } as never);
+    for (const id of ['', '.', '..']) expect(() => custodian.customers.get(id)).toThrow(/must not be/);
   });
 });

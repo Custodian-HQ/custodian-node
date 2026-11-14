@@ -1,5 +1,4 @@
 // HTTP client for the Custodian Data Vault API: API key, idempotency keys, typed errors.
-// Endpoint methods (customers, sessions, records, ...) are added with the API in Phase 1.
 import crypto from 'node:crypto';
 
 export const DEFAULT_BASE_URL = 'https://api.thecustodian.io/vault/v1';
@@ -7,6 +6,9 @@ export const DEFAULT_BASE_URL = 'https://api.thecustodian.io/vault/v1';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 32 << 20;
 const MAX_ERROR_BYTES = 64 << 10;
+const MAX_RAW_MESSAGE = 200;
+/** The `type` of an error the SDK makes itself. Not exported from the package. */
+export const API_ERROR_TYPE = 'api_error';
 
 export interface ClientOptions {
   baseUrl?: string;
@@ -17,6 +19,8 @@ export interface ClientOptions {
    * is reached the call rejects with a `TimeoutError` (`error.name === 'TimeoutError'`).
    */
   timeoutMs?: number;
+  /** Lets `baseUrl` use plain http for a host that is not local. The API key then travels in clear text. */
+  allowInsecureHttp?: boolean;
 }
 
 export class APIError extends Error {
@@ -50,6 +54,7 @@ export class Client {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('custodian: timeoutMs must be 0 or more');
     this.#apiKey = apiKey;
     this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    checkBaseUrl(this.#baseUrl, options.allowInsecureHttp === true);
     this.#fetch = options.fetch ?? fetch;
     this.#timeoutMs = timeoutMs;
   }
@@ -60,7 +65,7 @@ export class Client {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (method === 'POST') headers['Idempotency-Key'] = options.idempotencyKey ?? crypto.randomBytes(16).toString('hex');
 
-    const init: RequestInit = { method, headers };
+    const init: RequestInit = { method, headers, redirect: 'manual' };
     if (body !== undefined) init.body = JSON.stringify(body);
     const limit = withTimeout(options.signal, this.#timeoutMs);
     if (limit.signal) init.signal = limit.signal;
@@ -68,12 +73,12 @@ export class Client {
       const response = await this.#fetch(this.#baseUrl + path, init);
       if (!response.ok) throw parseError(response.status, (await readBody(response, MAX_ERROR_BYTES)).text);
       const { text, truncated } = await readBody(response, MAX_RESPONSE_BYTES);
-      if (truncated) throw new APIError(response.status, 'api_error', 'response_too_large', 'the answer is larger than 32 MiB');
+      if (truncated) throw new APIError(response.status, API_ERROR_TYPE, 'response_too_large', 'the answer is larger than 32 MiB');
       if (text === '') return undefined as T;
       try {
         return JSON.parse(text) as T;
       } catch {
-        throw new APIError(response.status, 'api_error', 'unparsed_response', 'the answer is not JSON');
+        throw new APIError(response.status, API_ERROR_TYPE, 'unparsed_response', 'the answer is not JSON');
       }
     } finally {
       limit.stop();
@@ -82,7 +87,7 @@ export class Client {
 
   /** Sends a GET and gives back the answer without reading its body, for a download. An error answer is read and thrown. */
   async stream(path: string, headers: Record<string, string> = {}, options: RequestOptions = {}): Promise<Response> {
-    const init: RequestInit = { method: 'GET', headers: { ...headers, Authorization: `Bearer ${this.#apiKey}`, Accept: 'application/octet-stream, application/json' } };
+    const init: RequestInit = { method: 'GET', headers: { ...headers, Authorization: `Bearer ${this.#apiKey}`, Accept: 'application/octet-stream, application/json' }, redirect: 'manual' };
     const limit = withTimeout(options.signal, this.#timeoutMs);
     if (limit.signal) init.signal = limit.signal;
     let response: Response;
@@ -95,6 +100,18 @@ export class Client {
     }
     return response;
   }
+}
+
+function checkBaseUrl(baseUrl: string, allowInsecureHttp: boolean): void {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error('custodian: the base URL is not valid');
+  }
+  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  if (url.protocol === 'https:' || (url.protocol === 'http:' && (local || allowInsecureHttp))) return;
+  throw new Error('custodian: the base URL must use https (plain http is only for localhost, or with allowInsecureHttp)');
 }
 
 function withTimeout(caller: AbortSignal | undefined, ms: number): { signal: AbortSignal | undefined; stop: () => void } {
@@ -130,9 +147,10 @@ function parseError(status: number, text: string): APIError {
   try {
     const parsed = JSON.parse(text) as { error?: { type?: string; code?: string; message?: string; request_id?: string; param?: string } };
     const e = parsed.error;
-    if (e?.code) return new APIError(status, e.type ?? 'api_error', e.code, e.message ?? '', e.request_id, e.param);
+    if (e?.code) return new APIError(status, e.type ?? API_ERROR_TYPE, e.code, e.message ?? '', e.request_id, e.param);
   } catch {
     // not JSON: fall through
   }
-  return new APIError(status, 'api_error', 'unparsed_error', text.trim());
+  const message = text.trim();
+  return new APIError(status, API_ERROR_TYPE, 'unparsed_error', message.length > MAX_RAW_MESSAGE ? `${message.slice(0, MAX_RAW_MESSAGE)}...` : message);
 }

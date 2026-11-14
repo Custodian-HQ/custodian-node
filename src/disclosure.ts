@@ -41,6 +41,12 @@ export function generateKey(suite: Suite = defaultSuite()): DisclosureKey {
   return { suite, privateKey, publicKey: x25519PublicKey(privateKey) };
 }
 
+/** The public key that belongs to a private key (the seed, for the hybrid suite). */
+export function publicKeyOf(suite: Suite, privateKey: Buffer): Buffer {
+  kemFor(suite);
+  return suite === SUITE_HYBRID ? xwing.publicKey(privateKey) : x25519PublicKey(privateKey);
+}
+
 export interface Sealed {
   enc: Buffer;
   info: Buffer;
@@ -53,10 +59,15 @@ export interface Sealed {
 export function open(suite: Suite, privateKey: Buffer, sealed: Sealed): Buffer {
   const receiver = setupReceiver(kemFor(suite), AES_256_GCM, privateKey, sealed.enc, sealed.info);
   const expected = receiver.export(COMMIT_LABEL, COMMIT_SIZE);
-  if (sealed.commit.length !== COMMIT_SIZE || !crypto.timingSafeEqual(expected, sealed.commit)) {
-    throw new Error('key commitment does not match');
+  try {
+    if (sealed.commit.length !== COMMIT_SIZE || !crypto.timingSafeEqual(expected, sealed.commit)) {
+      throw new Error('key commitment does not match');
+    }
+    return receiver.open(sealed.aad, sealed.ciphertext);
+  } finally {
+    expected.fill(0);
+    receiver.wipe();
   }
-  return receiver.open(sealed.aad, sealed.ciphertext);
 }
 
 /**

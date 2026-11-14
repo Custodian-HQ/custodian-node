@@ -16,11 +16,9 @@ export const Purpose = {
   Entry: 'entry',
   View: 'view',
   Approve: 'approve',
-  Recover: 'recover',
   RecoverySettings: 'recovery_settings',
   Reset: 'reset',
   Delete: 'delete',
-  Holder: 'holder',
 } as const;
 export type Purpose = (typeof Purpose)[keyof typeof Purpose];
 export const isPurpose = (text: string): text is Purpose => isValueOf(Purpose, text);

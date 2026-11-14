@@ -1,6 +1,6 @@
 // Builds a signed envelope in test code (classic suite), so a test can change one part and keep the signature good.
 import crypto from 'node:crypto';
-import { SUITE_CLASSIC, type Sealed } from '../src/disclosure.js';
+import { fingerprint, SUITE_CLASSIC, type Sealed } from '../src/disclosure.js';
 import type { Expected } from '../src/envelope.js';
 import { dhkemX25519, setupReceiver, x25519PublicKey } from '../src/hpke.js';
 
@@ -58,7 +58,8 @@ export function build(options: BuildOptions = {}): Built {
 
   const names = [...Object.keys(keys), ...Object.keys(files)].sort();
   const aad = Buffer.concat([head(4, names.length), ...names.map(text)]);
-  const info = Buffer.concat([Buffer.from('cdv/v1/disclosure'), Buffer.from([0]), Buffer.from(ids.businessId), Buffer.from([0]), Buffer.from(ids.requestId)]);
+  const rk = fingerprint(SUITE_CLASSIC, x25519PublicKey(receiver));
+  const info = Buffer.concat([Buffer.from('cdv/v1/disclosure'), Buffer.from([0]), Buffer.from(ids.businessId), Buffer.from([0]), Buffer.from(ids.requestId), Buffer.from([0]), Buffer.from(rk)]);
   const enc = x25519PublicKey(sender);
   // The receiver's shared secret is the sender's: the DH is symmetric. So the receiver code gives the key schedule for the seal.
   const hpke = setupReceiver(dhkemX25519, 2, receiver, enc, info);
@@ -82,19 +83,20 @@ export function build(options: BuildOptions = {}): Built {
   if (options.tamper?.ct) ct = options.tamper.ct(Buffer.from(ct));
 
   const statement = map([
-    ['v', uint(1)],
+    ['v', uint(2)],
     ['suite', text(SUITE_CLASSIC)],
     ['request_id', text(ids.requestId)],
     ['business_id', text(ids.businessId)],
     ['customer_id', text(ids.customerId)],
     ['kid', text(ids.kid)],
+    ['rk', text(rk)],
     ['enc', bytes(encOut)],
     ['commit', bytes(commit)],
     ['ct', bytes(ct)],
   ]);
   const sig = crypto.sign(null, Buffer.concat([Buffer.from('cdv/v1/sig-disclosure'), Buffer.from([0]), statement]), signing.privateKey);
   const envelope = {
-    v: 1,
+    v: 2,
     suite: SUITE_CLASSIC,
     request_id: ids.requestId,
     business_id: ids.businessId,

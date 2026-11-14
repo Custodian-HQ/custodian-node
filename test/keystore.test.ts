@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { EnvelopeError, hybridSupported, KeyStoreError, MemoryKeyStore, observe, openEnvelopeFor, SUITE_HYBRID, type Expected, type KeyStore } from '../src/index.js';
+import { EnvelopeError, hybridSupported, KeyStoreError, MemoryKeyStore, observe, observeEvent, openEnvelopeFor, SUITE_HYBRID, type Expected, type KeyStore } from '../src/index.js';
 import { nonCanonical } from './envelope-builder.js';
 
 interface Case {
@@ -148,5 +148,73 @@ describe('two events at once for one customer', () => {
   it('gives up with an error when a store keeps saying no and holds nothing', async () => {
     const store: KeyStore = { get: () => undefined, put: () => undefined, putIfAbsent: () => false, delete: () => undefined };
     await expect(observe(store, enrolled('cus_1', a))).rejects.toThrow(/did not keep/);
+  });
+});
+
+describe('observeEvent', () => {
+  const A = Buffer.alloc(32);
+  const B = Buffer.alloc(32, 1);
+  const enrol = (key: Buffer, created: number) => ({ ...enrolled('cus_1', key), created });
+  const gone = (type: string, created: number) => ({ type, created, data: { object: { id: 'cus_1' } } });
+  const yes = { approveReset: () => true };
+
+  it('refuses a reset with no callback, with a callback that says no, and with one that throws; the key stays', async () => {
+    for (const type of ['customer.reset', 'customer.deleted']) {
+      for (const [name, options] of Object.entries({ none: {}, no: { approveReset: () => false }, throws: { approveReset: () => { throw new Error('lookup failed'); } } })) {
+        const store = new MemoryKeyStore();
+        await observeEvent(store, enrol(A, 1), options);
+        const code = await codeOf(() => observeEvent(store, gone(type, 2), options));
+        expect(code, `${type} ${name}`).toBe(name === 'throws' ? 'other: Error: lookup failed' : 'reset_not_approved');
+        expect(store.get('cus_1')?.equals(A)).toBe(true);
+        expect(await codeOf(() => observeEvent(store, enrol(B, 3), options))).toBe('key_changed');
+      }
+    }
+  });
+
+  it('forgets the key after an approved reset and pins the next one', async () => {
+    for (const type of ['customer.reset', 'customer.deleted']) {
+      const store = new MemoryKeyStore();
+      await observeEvent(store, enrol(A, 1), yes);
+      await observeEvent(store, gone(type, 2), yes);
+      expect(store.get('cus_1')).toBeUndefined();
+      await observeEvent(store, enrol(B, 3), yes);
+      expect(store.get('cus_1')?.equals(B)).toBe(true);
+    }
+  });
+
+  it('refuses an event with no time, and keeps the clock', async () => {
+    const store = new MemoryKeyStore();
+    await observeEvent(store, enrol(A, 10), yes);
+    const noTime = { ...enrol(B, 11), created: undefined as unknown as number };
+    expect(await codeOf(() => observeEvent(store, noTime, yes))).toBe('format');
+    expect(store.lastEvent('cus_1')).toBe(10);
+  });
+
+  it('ignores an old enrolled event that arrives after a newer reset', async () => {
+    const store = new MemoryKeyStore();
+    await observeEvent(store, enrol(A, 10), yes);
+    await observeEvent(store, gone('customer.reset', 20), yes);
+    expect(await codeOf(() => observeEvent(store, enrol(A, 10), yes))).toBe('stale_event');
+    expect(store.get('cus_1')).toBeUndefined();
+  });
+
+  it('ignores an old reset that arrives after a newer enrolled event, and handles events of the same second', async () => {
+    const store = new MemoryKeyStore();
+    await observeEvent(store, enrol(A, 10), yes);
+    await observeEvent(store, gone('customer.reset', 20), yes);
+    await observeEvent(store, enrol(B, 30), yes);
+    expect(await codeOf(() => observeEvent(store, gone('customer.reset', 20), yes))).toBe('stale_event');
+    expect(store.get('cus_1')?.equals(B)).toBe(true);
+    expect(store.lastEvent('cus_1')).toBe(30);
+    await observeEvent(store, gone('customer.reset', 30), yes);
+    expect(store.get('cus_1')).toBeUndefined();
+  });
+
+  it('skips the order check when the store has no clock', async () => {
+    const inner = new MemoryKeyStore();
+    const plain: KeyStore = { get: (id) => inner.get(id), put: (id, k) => inner.put(id, k), delete: (id) => inner.delete(id) };
+    await observeEvent(plain, enrol(A, 20));
+    await observeEvent(plain, enrol(A, 10));
+    expect(inner.get('cus_1')?.equals(A)).toBe(true);
   });
 });

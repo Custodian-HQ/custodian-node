@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TOLERANCE_SECONDS, SIGNATURE_HEADER, WebhookError, constructEvent, customerSignInLimitReached, recoveryActionRequired, recoveryHolderDeclined, recoveryStatusChanged, verify } from '../src/webhook.js';
+import { DEFAULT_TOLERANCE_SECONDS, SIGNATURE_HEADER, WebhookError, constructEvent, customerSignInLimitReached, verify } from '../src/webhook.js';
 
 interface Vector {
   header_name: string;
@@ -76,45 +76,6 @@ describe('constructEvent', () => {
   });
 });
 
-describe('recoveryStatusChanged', () => {
-  const event = { id: 'evt_1', type: 'customer.recovery_status_changed', created: 1700000000, livemode: true,
-    data: { object: { customer: 'cus_1', livemode: true, status: 'off', reason: 'device_lost', holders: 2, threshold: 2, changed_at: '2026-10-27T18:24:57Z' } } };
-
-  it('reads the object of the event', () => {
-    expect(recoveryStatusChanged(event)).toMatchObject({ status: 'off', reason: 'device_lost', holders: 2, threshold: 2, customer: 'cus_1' });
-  });
-
-  it('refuses another event type', () => {
-    expect(() => recoveryStatusChanged({ ...event, type: 'session.completed' })).toThrow();
-  });
-});
-
-describe('recoveryActionRequired', () => {
-  const event = { id: 'evt_2', type: 'recovery.action_required', created: 1700000000, livemode: true,
-    data: { object: { customer: 'cus_1', livemode: true, holder: 'h_1', holder_type: 'contact', reason: 'holder_added', requested_at: '2026-10-27T18:24:57Z' } } };
-
-  it('reads the object of the event', () => {
-    expect(recoveryActionRequired(event)).toMatchObject({ holder: 'h_1', holder_type: 'contact', reason: 'holder_added', customer: 'cus_1' });
-  });
-
-  it('refuses another event type', () => {
-    expect(() => recoveryActionRequired({ ...event, type: 'customer.recovery_status_changed' })).toThrow();
-  });
-});
-
-describe('recoveryHolderDeclined', () => {
-  const event = { id: 'evt_3', type: 'recovery.holder_declined', created: 1700000000, livemode: true,
-    data: { object: { customer: 'cus_1', livemode: true, holder: 'h_1', holder_type: 'contact', recovery: 'r_1', declined_at: '2026-10-27T18:24:57Z' } } };
-
-  it('reads the object of the event', () => {
-    expect(recoveryHolderDeclined(event)).toMatchObject({ holder: 'h_1', recovery: 'r_1', customer: 'cus_1' });
-  });
-
-  it('refuses another event type', () => {
-    expect(() => recoveryHolderDeclined({ ...event, type: 'recovery.action_required' })).toThrow();
-  });
-});
-
 describe('customerSignInLimitReached', () => {
   const event = { id: 'evt_4', type: 'customer.sign_in_limit_reached', created: 1700000000, livemode: true,
     data: { object: { customer: 'cus_1', livemode: true, brake: 'keyring_read', limit: 10, reached_at: '2026-10-29T10:00:00Z' } } };
@@ -124,6 +85,16 @@ describe('customerSignInLimitReached', () => {
   });
 
   it('refuses another event type', () => {
-    expect(() => customerSignInLimitReached({ ...event, type: 'recovery.action_required' })).toThrow();
+    expect(() => customerSignInLimitReached({ ...event, type: 'session.completed' })).toThrow();
+  });
+});
+
+describe('webhook verify with an empty secret', () => {
+  it('refuses a signature made with an empty key', () => {
+    const body = '{"id":"evt_1"}';
+    const sig = crypto.createHmac('sha256', '').update('1700000000.').update(body).digest('hex');
+    expect(() => verify('', `t=1700000000,v1=${sig}`, body, { now: 1700000000 })).toThrowError(
+      expect.objectContaining({ name: 'WebhookError', code: 'signature' }),
+    );
   });
 });

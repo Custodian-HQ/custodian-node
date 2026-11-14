@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { approveUrl, EnvelopeError, generateKey, hybridSupported, openEnvelope, SUITE_CLASSIC, SUITE_HYBRID, type Expected } from '../src/index.js';
+import { approveUrl, EnvelopeError, fingerprint, generateKey, hybridSupported, openEnvelope, SUITE_CLASSIC, SUITE_HYBRID, type Expected } from '../src/index.js';
 
 interface Case {
   name: string;
   suite: typeof SUITE_CLASSIC | typeof SUITE_HYBRID;
   business_private_key_hex: string;
+  business_public_key_hex: string;
+  rk: string;
   kid: string;
   business_id: string;
   customer_id: string;
@@ -62,9 +64,19 @@ describe.each(cases)('the envelope the browser sealed for $suite', (c) => {
     }
   });
 
+  it_('names the business key and refuses a seal to a substituted key or an old version', () => {
+    const own = generateKey(c.suite);
+    expect(fingerprint(c.suite, Buffer.from(c.business_public_key_hex, 'hex'))).toBe(c.rk);
+    const swapped = c.refuse.find((r) => r.name === 'sealed to a key that is not the business key');
+    const old = c.refuse.find((r) => r.name === 'a version that is not 2');
+    expect(codeOf(() => openEnvelope(swapped!.envelope, expected(c)))).toBe('signature');
+    expect(codeOf(() => openEnvelope(old!.envelope, expected(c)))).toBe('format');
+    expect(codeOf(() => openEnvelope(c.envelope, { ...expected(c), privateKey: own.privateKey }))).toBe('signature');
+  });
+
   it_('refuses another private key and text that is not an envelope', () => {
     const other = generateKey(c.suite);
-    expect(codeOf(() => openEnvelope(c.envelope, { ...expected(c), privateKey: other.privateKey }))).toBe('payload');
+    expect(codeOf(() => openEnvelope(c.envelope, { ...expected(c), privateKey: other.privateKey }))).toBe('signature');
     expect(codeOf(() => openEnvelope('{', expected(c)))).toBe('format');
     expect(codeOf(() => openEnvelope('[]', expected(c)))).toBe('format');
     expect(codeOf(() => openEnvelope(JSON.stringify(c.envelope), expected(c)))).toBe('opened');
@@ -87,6 +99,11 @@ describe('the link of an approve session', () => {
   it('gets the fingerprint in the fragment only', () => {
     const fp = 'AB'.repeat(32);
     expect(approveUrl('https://vault.thecustodian.io/b/org_x/approve#st=cdvs_live_org_x_tok', fp)).toBe(`https://vault.thecustodian.io/b/org_x/approve#st=cdvs_live_org_x_tok&fp=${fp.toLowerCase()}`);
+  });
+
+  it('replaces an fp that is already in the fragment', () => {
+    const fp = 'ab'.repeat(32);
+    expect(approveUrl(`https://v.example/b/o/approve#st=t&fp=${'cd'.repeat(32)}&x=1&fp=1`, fp)).toBe(`https://v.example/b/o/approve#st=t&x=1&fp=${fp}`);
   });
 
   it('refuses a bad fingerprint or a link that cannot carry it', () => {

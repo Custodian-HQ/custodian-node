@@ -1,4 +1,5 @@
 // Reads the address the vault sent the customer back to.
+import crypto from 'node:crypto';
 
 /**
  * Returns the session id, trusting nothing else in the address. It needs `state` to be exactly the value your server
@@ -6,8 +7,6 @@
  * API for the session (`sessions.retrieve`) or wait for the webhook to learn what really happened.
  * Throws when the address cannot be used.
  */
-import crypto from 'node:crypto';
-
 export function parseReturn(returnUrl: string, expectedState: string): string {
   const bad = new Error('custodian: the return address is not valid for this request');
   if (expectedState === '') throw bad;
@@ -30,7 +29,7 @@ export function parseReturn(returnUrl: string, expectedState: string): string {
 
 /**
  * Adds your disclosure key's fingerprint to the link of an approve session, in the fragment, so it never reaches the vault's server. Take the
- * fingerprint from your own app configuration (`fingerprint()` of your key), not from the vault: the hosted page compares it with the key the
+ * fingerprint from your own app configuration (`fingerprint()` of your key), not from the vault: the vault page compares it with the key the
  * vault gives it, and stops the request if they differ. That check is what tells the customer the request is yours.
  * The address must use https. Plain http is allowed only for localhost, for local tests.
  */
@@ -44,5 +43,6 @@ export function approveUrl(sessionUrl: string, fingerprint: string): string {
   }
   const allowed = url.protocol === 'https:' || (url.protocol === 'http:' && url.hostname === 'localhost');
   if (url.hash.length < 2 || !allowed) throw new Error('custodian: the session address is not valid');
-  return `${sessionUrl}&fp=${fingerprint.toLowerCase()}`;
+  const kept = url.hash.slice(1).split('&').filter((part) => part !== '' && part.split('=')[0] !== 'fp');
+  return `${sessionUrl.slice(0, sessionUrl.indexOf('#'))}#${[...kept, `fp=${fingerprint.toLowerCase()}`].join('&')}`;
 }

@@ -9,8 +9,8 @@ const X25519_SPKI = Buffer.from('302a300506032b656e032100', 'hex');
 const XWING_LABEL = Buffer.from('5c2e2f2f5e5c', 'hex'); // \.//^\
 const XWING_CT_ML_KEM = 1088;
 
-export const KEM_X25519 = 0x0020;
-export const KEM_XWING = 0x647a;
+const KEM_X25519 = 0x0020;
+const KEM_XWING = 0x647a;
 
 /** Whether this Node can do ML-KEM, so the hybrid suite works. */
 export const hybridSupported: boolean = typeof crypto.encapsulate === 'function';
@@ -43,15 +43,18 @@ const labeledExtract = (suite: Buffer, salt: Buffer, label: string, ikm: Buffer)
 const labeledExpand = (suite: Buffer, prk: Buffer, label: string, info: Buffer, length: number): Buffer =>
   hkdfExpand(prk, Buffer.concat([u16(length), Buffer.from('HPKE-v1'), suite, Buffer.from(label), info]), length);
 
+function x25519PrivateKey(secret: Buffer): crypto.KeyObject {
+  return crypto.createPrivateKey({ key: Buffer.concat([X25519_PKCS8, secret]), format: 'der', type: 'pkcs8' });
+}
+
 function x25519(secret: Buffer, peerPublic: Buffer): Buffer {
-  const privateKey = crypto.createPrivateKey({ key: Buffer.concat([X25519_PKCS8, secret]), format: 'der', type: 'pkcs8' });
+  const privateKey = x25519PrivateKey(secret);
   const publicKey = crypto.createPublicKey({ key: Buffer.concat([X25519_SPKI, peerPublic]), format: 'der', type: 'spki' });
   return crypto.diffieHellman({ privateKey, publicKey });
 }
 
 export function x25519PublicKey(secret: Buffer): Buffer {
-  const privateKey = crypto.createPrivateKey({ key: Buffer.concat([X25519_PKCS8, secret]), format: 'der', type: 'pkcs8' });
-  return crypto.createPublicKey(privateKey).export({ format: 'der', type: 'spki' }).subarray(-32);
+  return crypto.createPublicKey(x25519PrivateKey(secret)).export({ format: 'der', type: 'spki' }).subarray(-32);
 }
 
 export const dhkemX25519: Kem = {
@@ -83,6 +86,7 @@ export const xwing: Kem & { publicKey(seed: Buffer): Buffer; generateSeed(): Buf
     return Buffer.concat([mlkemPublic, x25519PublicKey(x25519Secret)]);
   },
   decapsulate(seed, enc) {
+    if (enc.length !== XWING_CT_ML_KEM + 32) throw new Error('hpke: the X-Wing encapsulated key has the wrong length');
     const { mlkemSeed, x25519Secret } = expandXWingSeed(seed);
     const ctX25519 = enc.subarray(XWING_CT_ML_KEM, XWING_CT_ML_KEM + 32);
     const ssMlkem = crypto.decapsulate(mlkemKey(mlkemSeed), enc.subarray(0, XWING_CT_ML_KEM));
@@ -104,12 +108,14 @@ const NONCE_LENGTH = 12;
 const TAG_LENGTH = 16;
 const KDF_HKDF_SHA256 = 1;
 
-export interface Receiver {
+interface Receiver {
   readonly sharedSecret: Buffer;
   readonly key: Buffer;
   readonly baseNonce: Buffer;
   open(aad: Buffer, ciphertext: Buffer): Buffer;
   export(exporterContext: Buffer, length: number): Buffer;
+  /** Zeroes the secrets the receiver holds. Call it when done. */
+  wipe(): void;
 }
 
 /** Sets up an HPKE receiver (base mode, HKDF-SHA256). */
@@ -147,5 +153,8 @@ export function setupReceiver(kem: Kem, aeadId: AeadId, privateKey: Buffer, enc:
       return plaintext;
     },
     export: (exporterContext, length) => labeledExpand(suite, exporterSecret, 'sec', exporterContext, length),
+    wipe() {
+      for (const secret of [sharedSecret, key, baseNonce, exporterSecret]) secret.fill(0);
+    },
   };
 }

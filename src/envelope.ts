@@ -4,7 +4,7 @@
 // the key commitment; then that the sealed content names the same request and holds exactly the keys that were asked for.
 import crypto from 'node:crypto';
 import { decodeBase64Url } from './base64url.js';
-import { open as openSealed, SUITE_CLASSIC, SUITE_HYBRID, type Suite } from './disclosure.js';
+import { fingerprint, open as openSealed, publicKeyOf, SUITE_CLASSIC, SUITE_HYBRID, type Suite } from './disclosure.js';
 
 export type EnvelopeErrorCode = 'format' | 'request' | 'business' | 'customer' | 'key' | 'signature' | 'payload';
 
@@ -124,7 +124,7 @@ class Reader {
     if (major === 3) {
       const raw = this.#take(n);
       try {
-        return { kind: 's', s: new TextDecoder('utf-8', { fatal: true }).decode(raw) };
+        return { kind: 's', s: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw) };
       } catch {
         return this.#fail();
       }
@@ -179,7 +179,7 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
   }
   if (typeof w !== 'object' || w === null || Array.isArray(w)) throw new EnvelopeError('format', 'the envelope is not an object');
   const keys = Object.keys(w);
-  if (keys.length !== ENVELOPE_FIELDS.length || !ENVELOPE_FIELDS.every((k) => k in w) || w['v'] !== 1) throw new EnvelopeError('format', 'the envelope has the wrong fields');
+  if (keys.length !== ENVELOPE_FIELDS.length || !ENVELOPE_FIELDS.every((k) => k in w) || w['v'] !== 2) throw new EnvelopeError('format', 'the envelope has the wrong fields');
   for (const k of ['suite', 'request_id', 'business_id', 'customer_id', 'kid']) {
     if (typeof w[k] !== 'string') throw new EnvelopeError('format', `${k} is not text`);
   }
@@ -193,8 +193,15 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
   if (w['customer_id'] !== want.customerId) throw new EnvelopeError('customer', 'the envelope is for another customer');
   if (w['kid'] !== want.kid || w['suite'] !== want.suite || (want.suite !== SUITE_HYBRID && want.suite !== SUITE_CLASSIC)) throw new EnvelopeError('key', 'the envelope was sealed to another key');
 
+  // The key is named from your own private key, so an envelope sealed to any other key fails the signature below.
+  let rk: string;
+  try {
+    rk = fingerprint(want.suite, publicKeyOf(want.suite, want.privateKey));
+  } catch {
+    throw new EnvelopeError('key', 'the private key is not a valid key for the suite');
+  }
   const t = (name: string): [Buffer, Buffer] => [text(name), text(w[name] as string)];
-  const statement = encodeMap([[text('v'), head(0, 1)], t('suite'), t('request_id'), t('business_id'), t('customer_id'), t('kid'), [text('enc'), bytes(enc)], [text('commit'), bytes(commit)], [text('ct'), bytes(ct)]]);
+  const statement = encodeMap([[text('v'), head(0, 2)], t('suite'), t('request_id'), t('business_id'), t('customer_id'), t('kid'), [text('rk'), text(rk)], [text('enc'), bytes(enc)], [text('commit'), bytes(commit)], [text('ct'), bytes(ct)]]);
   let signed = false;
   if (want.signKey.length === 32 && sig.length === 64) {
     const publicKey = crypto.createPublicKey({ key: Buffer.concat([SPKI_ED25519, want.signKey]), format: 'der', type: 'spki' });
@@ -205,7 +212,7 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
   // Key names are ASCII, so sorting the strings sorts their bytes.
   const names = [...want.keys, ...(want.files ?? [])].sort();
   const aad = Buffer.concat([head(4, names.length), ...names.map(text)]);
-  const info = Buffer.concat([INFO_LABEL, Buffer.from([0]), Buffer.from(w['business_id'] as string), Buffer.from([0]), Buffer.from(w['request_id'] as string)]);
+  const info = Buffer.concat([INFO_LABEL, Buffer.from([0]), Buffer.from(w['business_id'] as string), Buffer.from([0]), Buffer.from(w['request_id'] as string), Buffer.from([0]), Buffer.from(rk)]);
   let plain: Buffer;
   try {
     plain = openSealed(want.suite, want.privateKey, { enc, info, aad, ciphertext: ct, commit });
@@ -220,7 +227,7 @@ export function openEnvelope(raw: string | Buffer | Record<string, unknown>, wan
 }
 
 /** Reads the sealed content. If it is refused, every file key it copied is cleared first. */
-export function readPayload(plain: Buffer, want: Expected): Opened {
+function readPayload(plain: Buffer, want: Expected): Opened {
   const reader = new Reader(plain);
   try {
     return parsePayload(plain, want, reader);

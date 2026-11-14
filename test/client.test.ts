@@ -161,23 +161,32 @@ describe('Client body limits', () => {
 });
 
 describe('Client redirects', () => {
-  it('does not send the API key to another host that a redirect names', async () => {
+  it('does not follow a redirect to another host', async () => {
     const seen: { a?: string | undefined; b?: string | undefined } = {};
     const b = await listen((req, res) => { seen.b = req.headers.authorization; res.end('{"landed":true}'); });
     other = b.server;
     const baseUrl = await serve((req, res) => { seen.a = req.headers.authorization; res.writeHead(302, { location: `${b.url}/stolen` }).end(); });
-    await expect(new Client('cdv_test_secret', { baseUrl }).request('GET', '/x')).resolves.toEqual({ landed: true });
+    await expect(new Client('cdv_test_secret', { baseUrl }).request('POST', '/x', { a: 1 })).rejects.toMatchObject({ status: 302 });
     expect(seen.a).toBe('Bearer cdv_test_secret');
     expect(seen.b).toBeUndefined();
   });
 
-  it('does not send it to another host on a download either', async () => {
+  it('does not follow a redirect on a download either', async () => {
     let leaked: string | undefined;
     const b = await listen((req, res) => { leaked = req.headers.authorization; res.end('file'); });
     other = b.server;
     const baseUrl = await serve((_req, res) => { res.writeHead(302, { location: b.url }).end(); });
-    const response = await new Client('cdv_test_secret', { baseUrl }).stream('/file');
-    expect(await response.text()).toBe('file');
+    await expect(new Client('cdv_test_secret', { baseUrl }).stream('/file')).rejects.toMatchObject({ status: 302 });
     expect(leaked).toBeUndefined();
+  });
+});
+
+describe('Client base URL', () => {
+  it('refuses plain http to a remote host unless the option allows it', () => {
+    expect(() => new Client('k', { baseUrl: 'http://api.example.com/vault/v1' })).toThrow(/https/);
+    expect(() => new Client('k', { baseUrl: 'http://api.example.com/vault/v1', allowInsecureHttp: true })).not.toThrow();
+    for (const baseUrl of ['http://localhost:8080', 'http://127.0.0.1:1', 'http://[::1]:1', 'https://api.example.com']) {
+      expect(() => new Client('k', { baseUrl })).not.toThrow();
+    }
   });
 });

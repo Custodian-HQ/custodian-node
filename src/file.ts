@@ -106,9 +106,9 @@ const hkdf = (key: Buffer, label: string, salt: Buffer): Buffer => Buffer.from(c
 
 /**
  * The stream layer alone: checks the header and gives out the plaintext of each chunk once its tag is good. The first value is the
- * header flags. Use `openFile` unless you test the layers apart.
+ * header flags. Use `openFile` unless you test the layers apart. `maxChunks` is the wire-format limit; change it only in tests.
  */
-export async function* openStream(fileKey: Buffer, aad: Buffer, ciphertext: AsyncIterable<Uint8Array> | Uint8Array): AsyncGenerator<number | Buffer> {
+export async function* openStream(fileKey: Buffer, aad: Buffer, ciphertext: AsyncIterable<Uint8Array> | Uint8Array, maxChunks = MAX_CHUNKS): AsyncGenerator<number | Buffer> {
   if (fileKey.length !== 32) throw new FileError('format', 'a file key is 32 bytes');
   if (fileKey.every((byte) => byte === 0)) throw new FileError('key_cleared', 'the file key was cleared');
   const input = new Input(ciphertext);
@@ -131,7 +131,7 @@ export async function* openStream(fileKey: Buffer, aad: Buffer, ciphertext: Asyn
 
     const full = size + TAG_SIZE;
     for (let counter = 0; ; counter++) {
-      if (counter >= MAX_CHUNKS) throw new FileError('too_long', 'the file has too many chunks');
+      if (counter >= maxChunks) throw new FileError('too_long', 'the file has too many chunks');
       // A full chunk is the last one only if nothing follows it.
       await input.fill(full + 1);
       const last = input.length <= full;
@@ -193,7 +193,7 @@ function frameContentSize(f: Buffer): number {
 }
 
 /** Decodes one zstd frame of at most one block. Refuses a frame that says no size, a wrong size, or holds more than one frame. */
-export function decodeFrame(frame: Buffer): Buffer {
+function decodeFrame(frame: Buffer): Buffer {
   const size = frameContentSize(frame);
   if (size === 0) throw new FileError('frame', 'a zstd frame is refused');
   let out: Buffer;

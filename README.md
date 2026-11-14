@@ -138,7 +138,7 @@ Pass the raw body, not parsed JSON.
 
 ```ts
 import express from 'express'; // any framework works if you pass the raw body
-import { MemoryKeyStore, constructEvent, observe } from '@custodian-hq/vault-node';
+import { MemoryKeyStore, constructEvent, observeEvent, KeyStoreError } from '@custodian-hq/vault-node';
 
 const store = new MemoryKeyStore(); // in production, keep keys in your own database
 
@@ -149,7 +149,15 @@ app.post('/webhooks/custodian', express.raw({ type: 'application/json' }), async
     const event = constructEvent(process.env.CUSTODIAN_WEBHOOK_SECRET!, req.header('Custodian-Signature') ?? '', req.body);
     // The same event can arrive more than once: ignore an event.id you already handled.
 
-    await observe(store, event); // keeps the customer's signing key from "customer.enrolled"
+    try {
+      // Keeps the customer's signing key from "customer.enrolled".
+      await observeEvent(store, event, {
+        // Say yes only if you started this reset or confirmed it with your own customer.
+        approveReset: (customerId) => resetIsExpected(customerId),
+      });
+    } catch (error) {
+      if (!(error instanceof KeyStoreError && error.code === 'stale_event')) throw error; // stale_event: an old event came late; acknowledge it
+    }
 
     // Handle event.type here.
     res.sendStatus(200);
@@ -159,9 +167,15 @@ app.post('/webhooks/custodian', express.raw({ type: 'application/json' }), async
 });
 ```
 
-**Why `observe` matters.** When a customer enrols, the event holds their **signing key**. Keep it.
+**Why `observeEvent` matters.** When a customer enrols, the event holds their **signing key**. Keep it.
 Later you use it to prove that data really came from this customer.
-If a later event names a different key, `observe` throws a `KeyStoreError` with the code `key_changed`. Treat that as an attack.
+If a later event names a different key, `observeEvent` throws a `KeyStoreError` with the code `key_changed`. Treat that as an attack.
+
+Webhooks are signed by Custodian with a secret that Custodian also holds. So a valid signature does not prove that a `customer.reset` is real.
+That is why a reset erases the key only when your `approveReset` callback says yes. Without the callback, `observeEvent` refuses every reset
+(`reset_not_approved`) and keeps the key. Approve a reset only when you started it or confirmed it with your own customer.
+If your store has `lastEvent` and `setLastEvent`, an event older than one already handled throws `stale_event`: a retried old event cannot pin an old
+key or erase a new one. The older `observe` function trusts the vault: it asks for no approval and does not check the order of events.
 
 ## 6. Other things a customer can do
 
@@ -173,10 +187,9 @@ You start every visit the same way as in step 3. Only the purpose changes.
 | `Purpose.Entry` | Let the customer add data. Give a `template` or `keys`. |
 | `Purpose.View` | Let the customer see a record. Give the `record` token. |
 | `Purpose.Approve` | Let the customer approve a disclosure request. Give the `disclosure` id. See step 7. |
-| `Purpose.Recover`, `Purpose.RecoverySettings` | Recovery with trusted people or devices, and its settings |
+| `Purpose.RecoverySettings` | Let the customer change their secret (new secret and new master key) |
 | `Purpose.Reset` | Start a reset. Use `customers.reset`. |
 | `Purpose.Delete` | Let the customer delete their own data |
-| `Purpose.Holder` | Let the customer's second device act as a recovery holder |
 
 `isPurpose(text)` tells you whether a text is a purpose this library knows.
 A newer API can send one that the library does not know yet.
@@ -276,7 +289,9 @@ try {
 |---|---|
 | `no_key` | You hold no signing key for this customer. Check that your webhook saw `customer.enrolled`. |
 | `key_changed` | An event names a different key than the one you kept. Treat it as an attack. |
-| `signature` | The customer's key did not sign this envelope. |
+| `reset_not_approved` | A `customer.reset` or `customer.deleted` event did not erase the key, because `approveReset` is not set or said no. |
+| `stale_event` | The event is older than one already handled for this customer. Nothing changed. Acknowledge it. |
+| `signature` | The customer's key did not sign this envelope, or the envelope was sealed to a key that is not your disclosure key. |
 | `request`, `business`, `customer`, `key` | The envelope is for something else than you asked. |
 | `format`, `payload` | The envelope is damaged, or its content is not what the customer approved. |
 
