@@ -22,11 +22,16 @@ jobs:
         run: node scripts/check-version.mjs "$GITHUB_REF_NAME"
       - run: npm audit signatures
       - run: npm pack --dry-run
-      - name: Publish (no token: npm trusts this workflow)
+      - name: Publish (no token, npm trusts this workflow)
         run: |
-          case "$GITHUB_REF_NAME" in
-            *-*) npm publish --access public --tag beta ;;
-            *)   npm publish --access public ;;
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            *-*)
+              # npm 11 needs a tag for a prerelease. 1.0.0-beta.2 goes to "beta", 1.0.0-rc.1 to "rc". Never "latest".
+              tag="${version#*-}"; tag="${tag%%.*}"
+              case "$tag" in latest|"") echo "bad prerelease tag in $version"; exit 1 ;; esac
+              npm publish --access public --tag "$tag" ;;
+            *) npm publish --access public ;;
           esac
       - name: GitHub release
         run: |
