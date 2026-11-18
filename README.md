@@ -169,7 +169,7 @@ app.post('/webhooks/custodian', express.raw({ type: 'application/json' }), async
 
 **Why `observeEvent` matters.** When a customer enrols, the event holds their **signing key**. Keep it.
 Later you use it to prove that data really came from this customer.
-If a later event names a different key, `observeEvent` throws a `KeyStoreError` with the code `key_changed`. Treat that as an attack.
+If a later event names a different key, `observeEvent` throws a `KeyStoreError` with the code `key_changed`. Do not trust the new key. Find out why it changed before you go on.
 
 Webhooks are signed by Custodian with a secret that Custodian also holds. So a valid signature does not prove that a `customer.reset` is real.
 That is why a reset erases the key only when your `approveReset` callback says yes. Without the callback, `observeEvent` refuses every reset
@@ -288,7 +288,7 @@ try {
 | Error code | What it means |
 |---|---|
 | `no_key` | You hold no signing key for this customer. Check that your webhook saw `customer.enrolled`. |
-| `key_changed` | An event names a different key than the one you kept. Treat it as an attack. |
+| `key_changed` | An event names a different key than the one you kept. Do not trust the new key. Find out why it changed before you go on. |
 | `reset_not_approved` | A `customer.reset` or `customer.deleted` event did not erase the key, because `approveReset` is not set or said no. |
 | `stale_event` | The event is older than one already handled for this customer. Nothing changed. Acknowledge it. |
 | `signature` | The customer's key did not sign this envelope, or the envelope was sealed to a key that is not your disclosure key. |

@@ -49,7 +49,7 @@ export class Client {
   readonly #timeoutMs: number;
 
   constructor(apiKey: string, options: ClientOptions = {}) {
-    if (apiKey.trim() === '') throw new Error('custodian: an API key is required');
+    if (apiKey.trim() === '') throw new Error('custodian: no API key was given. Pass your API key to the client');
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error('custodian: timeoutMs must be 0 or more');
     this.#apiKey = apiKey;
@@ -65,40 +65,38 @@ export class Client {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (method === 'POST') headers['Idempotency-Key'] = options.idempotencyKey ?? crypto.randomBytes(16).toString('hex');
 
-    const init: RequestInit = { method, headers, redirect: 'manual' };
+    const init: RequestInit = { method, headers };
     if (body !== undefined) init.body = JSON.stringify(body);
-    const limit = withTimeout(options.signal, this.#timeoutMs);
-    if (limit.signal) init.signal = limit.signal;
-    try {
-      const response = await this.#fetch(this.#baseUrl + path, init);
-      if (!response.ok) throw parseError(response.status, (await readBody(response, MAX_ERROR_BYTES)).text);
+    return this.#send(path, init, options.signal, async (response) => {
       const { text, truncated } = await readBody(response, MAX_RESPONSE_BYTES);
-      if (truncated) throw new APIError(response.status, API_ERROR_TYPE, 'response_too_large', 'the answer is larger than 32 MiB');
+      if (truncated) throw new APIError(response.status, API_ERROR_TYPE, 'response_too_large', 'the answer is larger than 32 MiB, so it was not read');
       if (text === '') return undefined as T;
       try {
         return JSON.parse(text) as T;
       } catch {
-        throw new APIError(response.status, API_ERROR_TYPE, 'unparsed_response', 'the answer is not JSON');
+        throw new APIError(response.status, API_ERROR_TYPE, 'unparsed_response', 'the vault sent an answer that is not JSON. A proxy between you and the vault may have changed it');
       }
-    } finally {
-      limit.stop();
-    }
+    });
   }
 
   /** Sends a GET and gives back the answer without reading its body, for a download. An error answer is read and thrown. */
   async stream(path: string, headers: Record<string, string> = {}, options: RequestOptions = {}): Promise<Response> {
-    const init: RequestInit = { method: 'GET', headers: { ...headers, Authorization: `Bearer ${this.#apiKey}`, Accept: 'application/octet-stream, application/json' }, redirect: 'manual' };
-    const limit = withTimeout(options.signal, this.#timeoutMs);
+    const init: RequestInit = { method: 'GET', headers: { ...headers, Authorization: `Bearer ${this.#apiKey}`, Accept: 'application/octet-stream, application/json' } };
+    // The time limit covers the wait for the answer only, so a large file can take as long as it needs.
+    return this.#send(path, init, options.signal, async (response) => response);
+  }
+
+  /** Runs one fetch under the time limit. Redirects are never followed, so the API key cannot go to another host. */
+  async #send<T>(path: string, init: RequestInit, signal: AbortSignal | undefined, handle: (response: Response) => Promise<T>): Promise<T> {
+    const limit = withTimeout(signal, this.#timeoutMs);
     if (limit.signal) init.signal = limit.signal;
-    let response: Response;
     try {
-      response = await this.#fetch(this.#baseUrl + path, init);
+      const response = await this.#fetch(this.#baseUrl + path, { ...init, redirect: 'manual' });
       if (!response.ok) throw parseError(response.status, (await readBody(response, MAX_ERROR_BYTES)).text);
+      return await handle(response);
     } finally {
-      // The time limit covers the wait for the answer only, so a large file can take as long as it needs.
       limit.stop();
     }
-    return response;
   }
 }
 
@@ -111,7 +109,7 @@ function checkBaseUrl(baseUrl: string, allowInsecureHttp: boolean): void {
   }
   const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
   if (url.protocol === 'https:' || (url.protocol === 'http:' && (local || allowInsecureHttp))) return;
-  throw new Error('custodian: the base URL must use https (plain http is only for localhost, or with allowInsecureHttp)');
+  throw new Error('custodian: the base URL must use https. Plain http works only for localhost, or when you set allowInsecureHttp');
 }
 
 function withTimeout(caller: AbortSignal | undefined, ms: number): { signal: AbortSignal | undefined; stop: () => void } {
