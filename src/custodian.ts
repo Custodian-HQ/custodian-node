@@ -358,7 +358,7 @@ export class Custodian {
         response = await this.#client.stream(`/disclosures/${enc(id)}/files/${enc(key)}`, headers, options.signal ? { signal: options.signal } : {});
       } catch (error) {
         if (error instanceof APIError && error.code === 'file_replaced') {
-          throw new APIError(error.status, error.type, error.code, 'the customer replaced or removed this file after approving it: ask them again', error.requestId);
+          throw new APIError(error.status, error.type, error.code, 'the customer replaced or removed this file after they approved it. Ask the customer to approve again', error.requestId);
         }
         throw error;
       }
@@ -384,8 +384,8 @@ export class Custodian {
   };
 
   readonly webhookDeliveries = {
-    list: async (params: { endpoint?: string; limit?: number; starting_after?: number } = {}): Promise<WebhookDelivery[]> =>
-      listData<WebhookDelivery>(this.#client, '/webhook-deliveries' + query(params)),
+    list: (params: { endpoint?: string; limit?: number; starting_after?: number } = {}): Promise<WebhookDelivery[]> =>
+      listData(this.#client, '/webhook-deliveries' + query(params)),
     retry: async (id: number): Promise<void> => {
       await this.#client.request('POST', `/webhook-deliveries/${id}/retry`);
     },

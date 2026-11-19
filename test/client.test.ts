@@ -22,9 +22,9 @@ async function listen(handler: http.RequestListener): Promise<{ server: http.Ser
 const nameOf = (error: unknown): string => (error instanceof Error ? error.name : String(error));
 
 async function serve(handler: http.RequestListener): Promise<string> {
-  server = http.createServer(handler);
-  await new Promise<void>((ok) => server!.listen(0, '127.0.0.1', ok));
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const started = await listen(handler);
+  server = started.server;
+  return started.url;
 }
 
 describe('Client', () => {

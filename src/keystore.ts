@@ -53,6 +53,12 @@ export class MemoryKeyStore implements KeyStore {
   }
 }
 
+function customerIdOf(event: { type: string; data: { object: unknown } }): string {
+  const id = (event.data.object as { id?: unknown } | null)?.id;
+  if (typeof id !== 'string' || id === '') throw new KeyStoreError('format', `the ${event.type} event does not hold an id`);
+  return id;
+}
+
 /** How `observeEvent` treats an event that erases a key. */
 export interface ObserveOptions {
   /**
@@ -72,15 +78,13 @@ export interface ObserveOptions {
  */
 export async function observeEvent(store: KeyStore, event: { type: string; created: number; data: { object: unknown } }, options: ObserveOptions = {}): Promise<void> {
   if (event.type !== EVENT_CUSTOMER_ENROLLED && event.type !== EVENT_CUSTOMER_RESET && event.type !== EVENT_CUSTOMER_DELETED) return;
-  const object = event.data.object as { id?: unknown } | null;
-  if (!object || typeof object.id !== 'string' || object.id === '') throw new KeyStoreError('format', `the ${event.type} event does not hold an id`);
-  const id = object.id;
+  const id = customerIdOf(event);
   const clock = store.lastEvent && store.setLastEvent ? { last: store.lastEvent.bind(store), set: store.setLastEvent.bind(store) } : undefined;
   if (clock && !Number.isFinite(event.created)) throw new KeyStoreError('format', `the ${event.type} event does not hold a time`);
   const last = clock ? await clock.last(id) : 0;
   if (clock && event.created < last) throw new KeyStoreError('stale_event', 'the event is older than one already handled for this customer');
   if (event.type !== EVENT_CUSTOMER_ENROLLED && !(options.approveReset && (await options.approveReset(id, event.type)))) {
-    throw new KeyStoreError('reset_not_approved', 'the reset was not approved, so the kept signing key stays; set approveReset');
+    throw new KeyStoreError('reset_not_approved', 'the reset was not approved, so the signing key stays. Set approveReset to approve a reset');
   }
   await observe(store, event);
   if (clock && event.created > last) await clock.set(id, event.created);
@@ -111,8 +115,7 @@ export async function observe(store: KeyStore, event: { type: string; data: { ob
     }
     throw new Error('custodian: the key store did not keep the signing key');
   } else if (event.type === EVENT_CUSTOMER_RESET || event.type === EVENT_CUSTOMER_DELETED) {
-    if (!object || typeof object.id !== 'string' || object.id === '') throw new KeyStoreError('format', `the ${event.type} event does not hold an id`);
-    await store.delete(object.id);
+    await store.delete(customerIdOf(event));
   }
 }
 

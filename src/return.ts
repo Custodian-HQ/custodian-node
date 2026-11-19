@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
  * Throws when the address cannot be used.
  */
 export function parseReturn(returnUrl: string, expectedState: string): string {
-  const bad = new Error('custodian: the return address is not valid for this request');
+  const bad = new Error('custodian: the return address is not valid for this request. Do not use it. Start a new session');
   if (expectedState === '') throw bad;
   let url: URL;
   try {
