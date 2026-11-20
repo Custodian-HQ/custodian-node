@@ -1,6 +1,6 @@
-import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { approveUrl, EnvelopeError, fingerprint, generateKey, hybridSupported, openEnvelope, SUITE_CLASSIC, SUITE_HYBRID, type Expected } from '../src/index.js';
+import { fixture } from './fixture.js';
+import { EnvelopeError, fingerprint, generateKey, hybridSupported, openEnvelope, SUITE_CLASSIC, SUITE_HYBRID, type Expected } from '../src/index.js';
 
 interface Case {
   name: string;
@@ -22,7 +22,7 @@ interface Case {
   envelope: Record<string, unknown>;
   refuse: { name: string; envelope: Record<string, unknown>; expected_override?: Record<string, unknown>; error: string }[];
 }
-const cases = (JSON.parse(fs.readFileSync('test/fixtures/v1/disclosure-envelope.json', 'utf8')) as { cases: Case[] }).cases;
+const cases = fixture<{ cases: Case[] }>('disclosure-envelope.json').cases;
 
 const expected = (c: Case): Expected => ({
   requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, kid: c.kid, keys: c.keys ?? [], files: c.files ?? [],
@@ -92,26 +92,5 @@ describe('the fixture', () => {
     const c = cases.find((x) => x.name === 'x25519-files-only')!;
     // With no file names the AAD changes, so the seal itself refuses: still a payload error.
     expect(codeOf(() => openEnvelope(c.envelope, { ...expected(c), files: [] }))).toBe('payload');
-  });
-});
-
-describe('the link of an approve session', () => {
-  it('gets the fingerprint in the fragment only', () => {
-    const fp = 'AB'.repeat(32);
-    expect(approveUrl('https://vault.thecustodian.io/b/org_x/approve#st=cdvs_live_org_x_tok', fp)).toBe(`https://vault.thecustodian.io/b/org_x/approve#st=cdvs_live_org_x_tok&fp=${fp.toLowerCase()}`);
-  });
-
-  it('replaces an fp that is already in the fragment', () => {
-    const fp = 'ab'.repeat(32);
-    expect(approveUrl(`https://v.example/b/o/approve#st=t&fp=${'cd'.repeat(32)}&x=1&fp=1`, fp)).toBe(`https://v.example/b/o/approve#st=t&x=1&fp=${fp}`);
-  });
-
-  it('refuses a bad fingerprint or a link that cannot carry it', () => {
-    const ok = 'https://vault.example/b/o/approve#st=t';
-    expect(() => approveUrl(ok, 'abcd')).toThrow(/64 hexadecimal/);
-    expect(() => approveUrl(ok, 'g'.repeat(64))).toThrow(/64 hexadecimal/);
-    expect(() => approveUrl('https://vault.example/b/o/approve', 'a'.repeat(64))).toThrow(/not valid/);
-    expect(() => approveUrl('http://vault.example/b/o/approve#st=t', 'a'.repeat(64))).toThrow(/not valid/);
-    expect(() => approveUrl('not a url', 'a'.repeat(64))).toThrow(/not valid/);
   });
 });

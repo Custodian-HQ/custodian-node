@@ -28,6 +28,15 @@ describe('approveUrl', () => {
     expect(approveUrl('https://localhost/b/o/approve#st=t', fp)).toContain('&fp=');
   });
 
+  it('puts the fingerprint in lower case, and replaces an fp that is already in the fragment', () => {
+    expect(approveUrl('https://vault.thecustodian.io/b/org_x/approve#st=tok', 'AB'.repeat(32))).toBe(`https://vault.thecustodian.io/b/org_x/approve#st=tok&fp=${'ab'.repeat(32)}`);
+    expect(approveUrl(`https://v.example/b/o/approve#st=t&fp=${'cd'.repeat(32)}&x=1&fp=1`, fp)).toBe(`https://v.example/b/o/approve#st=t&x=1&fp=${fp}`);
+  });
+
+  it('refuses a fingerprint that is not 64 hexadecimal characters', () => {
+    for (const bad of ['abcd', 'g'.repeat(64)]) expect(() => approveUrl('https://vault.example/b/o/approve#st=t', bad)).toThrow(/64 hexadecimal/);
+  });
+
   it('refuses every other scheme, even for localhost', () => {
     for (const url of [
       'javascript://localhost/%0Aalert(1)#x',

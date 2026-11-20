@@ -141,11 +141,7 @@ export function setupReceiver(kem: Kem, aeadId: AeadId, privateKey: Buffer, enc:
     open(aad, ciphertext) {
       const nonce = Buffer.from(baseNonce);
       for (let i = 0; i < NONCE_LENGTH; i++) nonce[NONCE_LENGTH - 1 - i]! ^= Number((sequence >> BigInt(8 * i)) & 0xffn);
-      // Node types the two cipher families separately, so each branch names its own literal.
-      const decipher =
-        cipher === 'chacha20-poly1305'
-          ? crypto.createDecipheriv(cipher, key, nonce, { authTagLength: TAG_LENGTH })
-          : crypto.createDecipheriv(cipher, key, nonce, { authTagLength: TAG_LENGTH });
+      const decipher = crypto.createDecipheriv(cipher as 'aes-256-gcm', key, nonce, { authTagLength: TAG_LENGTH });
       decipher.setAAD(aad, { plaintextLength: ciphertext.length - TAG_LENGTH });
       decipher.setAuthTag(ciphertext.subarray(-TAG_LENGTH));
       const plaintext = Buffer.concat([decipher.update(ciphertext.subarray(0, -TAG_LENGTH)), decipher.final()]);

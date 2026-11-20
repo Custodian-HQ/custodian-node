@@ -1,6 +1,6 @@
-import fs from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { decodePayload, EnvelopeError, openEnvelope } from '../src/envelope.js';
+import { fixture } from './fixture.js';
 import { build, bytes, grant, head, map, nonCanonical, text, uint } from './envelope-builder.js';
 
 function codeOf(run: () => unknown): { code: string; message: string } {
@@ -138,7 +138,7 @@ describe('the CBOR reader', () => {
   });
 
   it('refuses everything in the shared list of invalid items', () => {
-    const shared = JSON.parse(fs.readFileSync('test/fixtures/v1/cbor.json', 'utf8')) as { invalid: { name: string; hex: string }[] };
+    const shared = fixture<{ invalid: { name: string; hex: string }[] }>('cbor.json');
     expect(shared.invalid.length).toBeGreaterThanOrEqual(20);
     for (const item of shared.invalid) expect(refused(item.hex), item.name).toBe(true);
   });

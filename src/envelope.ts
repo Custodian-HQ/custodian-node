@@ -87,6 +87,8 @@ function encodeMap(pairs: [Buffer, Buffer][]): Buffer {
 
 type Item = { kind: 'n'; n: number } | { kind: 's'; s: string } | { kind: 'b'; b: Buffer } | { kind: 'm'; m: [string, Item][] };
 
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
 class Reader {
   #at = 0;
   /** Every byte string the reader copied out, so a failure can wipe them. */
@@ -124,7 +126,7 @@ class Reader {
     if (major === 3) {
       const raw = this.#take(n);
       try {
-        return { kind: 's', s: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw) };
+        return { kind: 's', s: utf8.decode(raw) };
       } catch {
         return this.#fail();
       }

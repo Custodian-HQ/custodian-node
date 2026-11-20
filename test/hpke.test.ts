@@ -1,11 +1,10 @@
-import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SUITE_CLASSIC, SUITE_HYBRID, defaultSuite, fingerprint, generateKey, open, type Sealed, type Suite } from '../src/disclosure.js';
 import { hybridSupported, setupReceiver, xwing, type AeadId } from '../src/hpke.js';
 import { build } from './envelope-builder.js';
+import { fixture } from './fixture.js';
 
 const hex = (s: string): Buffer => Buffer.from(s, 'hex');
-const fixture = <T>(name: string): T => JSON.parse(fs.readFileSync(`test/fixtures/v1/${name}`, 'utf8')) as T;
 const hybrid = hybridSupported ? it : it.skip;
 const AUTHENTICATION = /authenticate/;
 

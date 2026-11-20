@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_TOLERANCE_SECONDS, SIGNATURE_HEADER, WebhookError, constructEvent, customerSignInLimitReached, verify } from '../src/webhook.js';
+import { fixture } from './fixture.js';
 
 interface Vector {
   header_name: string;
@@ -11,7 +11,7 @@ interface Vector {
   cases: { name: string; header: string; now: number; valid: boolean; error?: string; body?: string }[];
 }
 // The cases are the shared known answers in the fixtures. The first signature in them was made by the API's own code.
-const vector = JSON.parse(fs.readFileSync('test/fixtures/v1/webhook-signature.json', 'utf8')) as Vector;
+const vector = fixture<Vector>('webhook-signature.json');
 
 describe('webhook verify, against the shared known answers', () => {
   it('uses the header name and tolerance of the API', () => {
