@@ -174,8 +174,13 @@ If a later event names a different key, `observeEvent` throws a `KeyStoreError` 
 Webhooks are signed by Custodian with a secret that Custodian also holds. So a valid signature does not prove that a `customer.reset` is real.
 That is why a reset erases the key only when your `approveReset` callback says yes. Without the callback, `observeEvent` refuses every reset
 (`reset_not_approved`) and keeps the key. Approve a reset only when you started it or confirmed it with your own customer.
-If your store has `lastEvent` and `setLastEvent`, an event older than one already handled throws `stale_event`: a retried old event cannot pin an old
-key or erase a new one. The older `observe` function trusts the vault: it asks for no approval and does not check the order of events.
+Every `KeyStore` has `advanceLastEvent(customerId, created)`. `observeEvent` calls it first. It must be one atomic step: keep the newer of the stored
+time and `created`, and return `false` if `created` is older. An event older than one already handled throws `stale_event` and does nothing else: a
+retried old event cannot pin an old key or erase a new one. The older `observe` function trusts the vault: it asks for no approval and does not check
+the order of events.
+
+**Breaking change.** `KeyStore` has a new required method, `advanceLastEvent`. It replaces the optional `lastEvent` and `setLastEvent`, which are
+removed. If you have your own store, add the method (see the docs page "Key store"). `MemoryKeyStore` has it.
 
 ## 6. Other things a customer can do
 

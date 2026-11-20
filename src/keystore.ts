@@ -22,9 +22,12 @@ export interface KeyStore {
    */
   putIfAbsent?(customerId: string, key: Buffer): boolean | Promise<boolean>;
   delete(customerId: string): void | Promise<void>;
-  /** The `created` time of the last event handled for the customer, or 0 if none. Give both clock methods to turn on the order check of `observeEvent`. */
-  lastEvent?(customerId: string): number | Promise<number>;
-  setLastEvent?(customerId: string, created: number): void | Promise<void>;
+  /**
+   * Keeps the `created` time of the last event handled for the customer. It must be atomic, for example one `UPDATE ... SET last_event = GREATEST(last_event, $2)`.
+   * If `created` is older than the kept time, it changes nothing and returns false. Otherwise it keeps the newer time and returns true. An equal time
+   * returns true: events of one second cannot be put in order, and a retry of an event that failed must pass.
+   */
+  advanceLastEvent(customerId: string, created: number): boolean | Promise<boolean>;
 }
 
 /** A KeyStore in memory, for tests and for programs that do not restart. */
@@ -34,11 +37,14 @@ export class MemoryKeyStore implements KeyStore {
   lastEvent(customerId: string): number {
     return this.#clock.get(customerId) ?? 0;
   }
-  setLastEvent(customerId: string, created: number): void {
+  advanceLastEvent(customerId: string, created: number): boolean {
+    if (created < this.lastEvent(customerId)) return false;
     this.#clock.set(customerId, created);
+    return true;
   }
   get(customerId: string): Buffer | undefined {
-    return this.#keys.get(customerId);
+    const key = this.#keys.get(customerId);
+    return key && Buffer.from(key);
   }
   put(customerId: string, key: Buffer): void {
     this.#keys.set(customerId, Buffer.from(key));
@@ -71,23 +77,20 @@ export interface ObserveOptions {
 
 /**
  * `observe` with two more checks. Use it for every verified event.
+ * - First it calls `store.advanceLastEvent`. If the event is older than the last one handled for the customer, it throws stale_event and does nothing
+ *   else: a retried old event cannot pin an old key or erase a new one. Treat stale_event as handled and acknowledge the webhook. Events with the same
+ *   `created` second cannot be put in order, so all are handled. The time is kept before the reset check, so a refused or failed event still counts as seen.
  * - customer.reset and customer.deleted erase the kept key only if `approveReset` says yes. Without it they throw reset_not_approved and the key stays.
- * - If the store has `lastEvent` and `setLastEvent`, an event older than the last one handled for the customer throws stale_event and changes
- *   nothing: a retried old event cannot pin an old key or erase a new one. Treat stale_event as handled and acknowledge the webhook. Events with the
- *   same `created` second cannot be put in order, so all are handled. A store without the clock methods skips this check.
  */
 export async function observeEvent(store: KeyStore, event: { type: string; created: number; data: { object: unknown } }, options: ObserveOptions = {}): Promise<void> {
   if (event.type !== EVENT_CUSTOMER_ENROLLED && event.type !== EVENT_CUSTOMER_RESET && event.type !== EVENT_CUSTOMER_DELETED) return;
   const id = customerIdOf(event);
-  const clock = store.lastEvent && store.setLastEvent ? { last: store.lastEvent.bind(store), set: store.setLastEvent.bind(store) } : undefined;
-  if (clock && !Number.isFinite(event.created)) throw new KeyStoreError('format', `the ${event.type} event does not hold a time`);
-  const last = clock ? await clock.last(id) : 0;
-  if (clock && event.created < last) throw new KeyStoreError('stale_event', 'the event is older than one already handled for this customer');
+  if (!Number.isFinite(event.created)) throw new KeyStoreError('format', `the ${event.type} event does not hold a time`);
+  if (!(await store.advanceLastEvent(id, event.created))) throw new KeyStoreError('stale_event', 'the event is older than one already handled for this customer');
   if (event.type !== EVENT_CUSTOMER_ENROLLED && !(options.approveReset && (await options.approveReset(id, event.type)))) {
     throw new KeyStoreError('reset_not_approved', 'the reset was not approved, so the signing key stays. Set approveReset to approve a reset');
   }
   await observe(store, event);
-  if (clock && event.created > last) await clock.set(id, event.created);
 }
 
 /**

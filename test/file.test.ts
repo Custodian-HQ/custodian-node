@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { Custodian } from '../src/custodian.js';
 import { decodeRecords, FileError, fileAAD, openFile, openStream, receiveFile } from '../src/file.js';
 import { FILE_KEY_ID, type Opened } from '../src/envelope.js';
+import { fixture } from './fixture.js';
 
 interface StreamCase {
   name: string;
@@ -18,12 +18,12 @@ interface StreamCase {
   stream_sha256: string;
   stream_hex?: string;
 }
-const fs_ = JSON.parse(fs.readFileSync('test/fixtures/v1/file-stream.json', 'utf8')) as {
+const fs_ = fixture<{
   key_hex: string; key_id_hex: string; other_key_hex: string; aad_hex: string; cases: StreamCase[]; refusal_stream: StreamCase; must_fail: { name: string; stream_hex: string; error: string }[];
-};
-const zs = JSON.parse(fs.readFileSync('test/fixtures/v1/zstd-records.json', 'utf8')) as {
+}>('file-stream.json');
+const zs = fixture<{
   max_frame: number; cases: { name: string; plaintext_bytes: number; records_hex: string }[]; must_fail: { name: string; records_hex: string; error: string }[];
-};
+}>('zstd-records.json');
 
 const key = Buffer.from(fs_.key_hex, 'hex');
 const aad = Buffer.from(fs_.aad_hex, 'hex');

@@ -1,7 +1,7 @@
-import fs from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EnvelopeError, hybridSupported, KeyStoreError, MemoryKeyStore, observe, observeEvent, openEnvelopeFor, SUITE_HYBRID, type Expected, type KeyStore } from '../src/index.js';
 import { nonCanonical } from './envelope-builder.js';
+import { fixture } from './fixture.js';
 
 interface Case {
   suite: string;
@@ -15,7 +15,7 @@ interface Case {
   files?: string[];
   envelope: Record<string, unknown>;
 }
-const cases = (JSON.parse(fs.readFileSync('test/fixtures/v1/disclosure-envelope.json', 'utf8')) as { cases: Case[] }).cases;
+const cases = fixture<{ cases: Case[] }>('disclosure-envelope.json').cases;
 const want = (c: Case): Omit<Expected, 'signKey'> => ({
   requestId: c.request_id, businessId: c.business_id, customerId: c.customer_id, kid: c.kid, keys: c.keys ?? [], files: c.files ?? [], suite: c.suite as Expected['suite'], privateKey: Buffer.from(c.business_private_key_hex, 'hex'),
 });
@@ -87,32 +87,37 @@ describe('the key store', () => {
   });
 });
 
+const pause = (): Promise<void> => new Promise((done) => setTimeout(done, 5));
+
+/** A store that waits on every call, as a database does. `putIfAbsent` is atomic, as it must be. */
+class SlowStore implements KeyStore {
+  readonly inner = new MemoryKeyStore();
+  async get(id: string): Promise<Buffer | undefined> {
+    await pause();
+    return this.inner.get(id);
+  }
+  async put(id: string, key: Buffer): Promise<void> {
+    await pause();
+    this.inner.put(id, key);
+  }
+  async putIfAbsent(id: string, key: Buffer): Promise<boolean> {
+    await pause();
+    return this.inner.putIfAbsent(id, key);
+  }
+  async delete(id: string): Promise<void> {
+    await pause();
+    this.inner.delete(id);
+  }
+  async advanceLastEvent(id: string, created: number): Promise<boolean> {
+    await pause();
+    return this.inner.advanceLastEvent(id, created);
+  }
+}
+
+
 describe('two events at once for one customer', () => {
   const a = Buffer.alloc(32, 1);
   const b = Buffer.alloc(32, 2);
-  const pause = (): Promise<void> => new Promise((done) => setTimeout(done, 5));
-
-  /** A store that waits on every call, as a database does. `putIfAbsent` is atomic, as it must be. */
-  class SlowStore implements KeyStore {
-    readonly inner = new MemoryKeyStore();
-    async get(id: string): Promise<Buffer | undefined> {
-      await pause();
-      return this.inner.get(id);
-    }
-    async put(id: string, key: Buffer): Promise<void> {
-      await pause();
-      this.inner.put(id, key);
-    }
-    async putIfAbsent(id: string, key: Buffer): Promise<boolean> {
-      await pause();
-      return this.inner.putIfAbsent(id, key);
-    }
-    async delete(id: string): Promise<void> {
-      await pause();
-      this.inner.delete(id);
-    }
-  }
-
   const oneWins = (results: PromiseSettledResult<void>[]): void => {
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const lost = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
@@ -139,14 +144,14 @@ describe('two events at once for one customer', () => {
   });
 
   it('stays correct with a store that has no putIfAbsent, when the events come one after the other', async () => {
-    const store: KeyStore = { get: (id) => inner.get(id), put: (id, key) => inner.put(id, key), delete: (id) => inner.delete(id) };
+    const store: KeyStore = { get: (id) => inner.get(id), put: (id, key) => inner.put(id, key), delete: (id) => inner.delete(id), advanceLastEvent: (id, t) => inner.advanceLastEvent(id, t) };
     const inner = new MemoryKeyStore();
     await observe(store, enrolled('cus_1', a));
     expect(await codeOf(() => observe(store, enrolled('cus_1', b)))).toBe('key_changed');
   });
 
   it('gives up with an error when a store keeps saying no and holds nothing', async () => {
-    const store: KeyStore = { get: () => undefined, put: () => undefined, putIfAbsent: () => false, delete: () => undefined };
+    const store: KeyStore = { get: () => undefined, put: () => undefined, putIfAbsent: () => false, delete: () => undefined, advanceLastEvent: () => true };
     await expect(observe(store, enrolled('cus_1', a))).rejects.toThrow(/did not keep/);
   });
 });
@@ -210,11 +215,46 @@ describe('observeEvent', () => {
     expect(store.get('cus_1')).toBeUndefined();
   });
 
-  it('skips the order check when the store has no clock', async () => {
-    const inner = new MemoryKeyStore();
-    const plain: KeyStore = { get: (id) => inner.get(id), put: (id, k) => inner.put(id, k), delete: (id) => inner.delete(id) };
-    await observeEvent(plain, enrol(A, 20));
-    await observeEvent(plain, enrol(A, 10));
-    expect(inner.get('cus_1')?.equals(A)).toBe(true);
+  it('never lowers the clock and refuses an older time, in one step', () => {
+    const store = new MemoryKeyStore();
+    expect([10, 20, 15, 20, 0].map((t) => [store.advanceLastEvent('cus_1', t), store.lastEvent('cus_1')])).toEqual([
+      [true, 10],
+      [true, 20],
+      [false, 20],
+      [true, 20],
+      [false, 20],
+    ]);
+  });
+
+  it('refuses the stale event exactly once when it comes with a newer one at once, with a store that waits', async () => {
+    for (let round = 0; round < 20; round++) {
+      const store = new SlowStore();
+      store.inner.advanceLastEvent('cus_1', 20);
+      const results = await Promise.allSettled([observeEvent(store, enrol(A, 10), yes), observeEvent(store, enrol(B, 30), yes)]);
+      expect(results[0].status).toBe('rejected');
+      expect(((results[0] as PromiseRejectedResult).reason as KeyStoreError).code).toBe('stale_event');
+      expect(results[1].status).toBe('fulfilled');
+      expect(store.inner.lastEvent('cus_1')).toBe(30);
+      expect(store.inner.get('cus_1')?.equals(B)).toBe(true);
+    }
+  });
+
+  it('does not ask approval for a stale event', async () => {
+    const store = new MemoryKeyStore();
+    await observeEvent(store, enrol(A, 20), yes);
+    const approve = vi.fn(() => true);
+    expect(await codeOf(() => observeEvent(store, gone('customer.reset', 10), { approveReset: approve }))).toBe('stale_event');
+    expect(approve).not.toHaveBeenCalled();
+    expect(store.get('cus_1')?.equals(A)).toBe(true);
+  });
+});
+
+describe('MemoryKeyStore copies', () => {
+  it('does not let a caller change a kept key', () => {
+    const store = new MemoryKeyStore();
+    const key = Buffer.alloc(32, 7);
+    store.put('cus_1', key);
+    store.get('cus_1')![0] = 0;
+    expect(store.get('cus_1')!.equals(key)).toBe(true);
   });
 });
